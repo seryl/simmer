@@ -1,0 +1,13 @@
+[package]
+name = "simmer"
+description = "Instant Nix devshells: cached environments replayed natively into fish/bash/zsh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+notify.workspace = true
+simmer-core = { path = "../simmer-core" }
