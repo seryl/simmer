@@ -4,6 +4,7 @@
 //! and emit nothing when the environment is already current.
 
 mod daemon;
+mod direnv_shim;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -75,6 +76,14 @@ enum Cmd {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// direnv-compatible CLI shim (export json/bash/…, exec, allow,
+    /// reload, version, hook) — install a `direnv` wrapper that execs
+    /// `simmer direnv "$@"` so editors' direnv plugins get simmer envs.
+    #[command(trailing_var_arg = true)]
+    Direnv {
+        #[arg(allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 fn main() {
@@ -92,6 +101,7 @@ fn main() {
         Cmd::Doctor { dir } => cmd_doctor(dir),
         Cmd::Allow { dir } => cmd_allow(dir, true),
         Cmd::Deny { dir } => cmd_allow(dir, false),
+        Cmd::Direnv { args } => direnv_shim::run(&args),
     };
     if let Err(e) = result {
         // The hook pipes stdout into `source`; errors must stay on stderr

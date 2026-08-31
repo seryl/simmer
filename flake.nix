@@ -39,6 +39,7 @@
       };
   in {
     packages = forSystems (system: let
+      pkgs = nixpkgs.legacyPackages.${system};
       craneLib = craneFor system;
       simmer = craneLib.buildPackage {
         pname = "simmer";
@@ -50,9 +51,17 @@
           mainProgram = "simmer";
         };
       };
+      # A `direnv`-named wrapper: editors and tools that shell out to
+      # direnv (VSCode/Zed/Emacs plugins, `direnv exec` launchers) reach
+      # simmer for trusted projects and are delegated to the real direnv
+      # otherwise. Install with priority over pkgs.direnv.
+      direnv-shim = pkgs.writeShellScriptBin "direnv" ''
+        export SIMMER_DIRENV_FALLBACK=''${SIMMER_DIRENV_FALLBACK:-${pkgs.direnv}/bin/direnv}
+        exec ${simmer}/bin/simmer direnv "$@"
+      '';
     in {
       default = simmer;
-      inherit simmer;
+      inherit simmer direnv-shim;
     });
 
     checks = forSystems (system: let

@@ -1,4 +1,5 @@
-//! Compile an [`EnvProfile`] into native shell code, and back out again.
+//! Compile an [`EnvProfile`] into environment *changes*, then render them
+//! as native shell code or as data (direnv-compatible JSON).
 //!
 //! Session state (which vars we set, what they held before) travels inside
 //! the shell itself as `__SIMMER_STATE`, so unloading needs no cache
@@ -42,9 +43,11 @@ pub struct SessionState {
 pub const STATE_VAR: &str = "__SIMMER_STATE";
 pub const GEN_VAR: &str = "SIMMER_GEN";
 
+/// An environment delta: `Some(value)` sets, `None` unsets.
+pub type Changes = BTreeMap<String, Option<String>>;
+
 /// The caller's environment with any active simmer session backed out —
-/// the baseline both unload scripts and fresh applies must be computed
-/// against.
+/// the baseline both unload and fresh applies must be computed against.
 pub fn effective_env(
     current: &BTreeMap<String, String>,
     state: Option<&SessionState>,
@@ -67,18 +70,17 @@ pub fn read_state(current: &BTreeMap<String, String>) -> Option<SessionState> {
     serde_json::from_str(current.get(STATE_VAR)?).ok()
 }
 
-/// Emit code that applies `profile` on top of `base` (an [`effective_env`]
-/// result). If `prior` is an active session, its teardown is emitted first
-/// so generation switches are atomic from the shell's point of view.
-pub fn apply_script(
-    shell: Shell,
+/// Compute the delta that applies `profile` on top of `base` (an
+/// [`effective_env`] result). If `prior` is an active session its
+/// teardown is folded in first, so generation switches are atomic.
+pub fn apply_changes(
     profile: &EnvProfile,
     base: &BTreeMap<String, String>,
     prior: Option<&SessionState>,
-) -> String {
-    let mut out = String::new();
+) -> Changes {
+    let mut changes = Changes::new();
     if let Some(prior) = prior {
-        unload_into(&mut out, shell, prior, base);
+        unload_into(&mut changes, prior, base);
     }
 
     let mut state = SessionState {
@@ -98,29 +100,58 @@ pub fn apply_script(
                 _ => prefix.clone(),
             },
         };
-        emit_set(&mut out, shell, name, &resolved);
+        changes.insert(name.clone(), Some(resolved));
     }
-    emit_set(&mut out, shell, GEN_VAR, &profile.generation);
-    emit_set(&mut out, shell, STATE_VAR, &serde_json::to_string(&state).unwrap_or_default());
+    changes.insert(GEN_VAR.into(), Some(profile.generation.clone()));
+    changes.insert(
+        STATE_VAR.into(),
+        Some(serde_json::to_string(&state).unwrap_or_default()),
+    );
+    changes
+}
+
+/// Compute the delta that tears down `state`, restoring the pre-apply
+/// world.
+pub fn unload_changes(state: &SessionState, base: &BTreeMap<String, String>) -> Changes {
+    let mut changes = Changes::new();
+    unload_into(&mut changes, state, base);
+    changes
+}
+
+fn unload_into(changes: &mut Changes, state: &SessionState, base: &BTreeMap<String, String>) {
+    for name in &state.set {
+        changes.insert(name.clone(), base.get(name).cloned());
+    }
+    changes.insert(GEN_VAR.into(), None);
+    changes.insert(STATE_VAR.into(), None);
+}
+
+/// Render a delta as native shell code.
+pub fn render(shell: Shell, changes: &Changes) -> String {
+    let mut out = String::new();
+    for (name, value) in changes {
+        match value {
+            Some(value) => emit_set(&mut out, shell, name, value),
+            None => emit_erase(&mut out, shell, name),
+        }
+    }
     out
+}
+
+/// Emit code that applies `profile` on top of `base`, tearing down
+/// `prior` first when present.
+pub fn apply_script(
+    shell: Shell,
+    profile: &EnvProfile,
+    base: &BTreeMap<String, String>,
+    prior: Option<&SessionState>,
+) -> String {
+    render(shell, &apply_changes(profile, base, prior))
 }
 
 /// Emit code that tears down `state`, restoring the pre-apply world.
 pub fn unload_script(shell: Shell, state: &SessionState, base: &BTreeMap<String, String>) -> String {
-    let mut out = String::new();
-    unload_into(&mut out, shell, state, base);
-    out
-}
-
-fn unload_into(out: &mut String, shell: Shell, state: &SessionState, base: &BTreeMap<String, String>) {
-    for name in &state.set {
-        match base.get(name) {
-            Some(value) => emit_set(out, shell, name, value),
-            None => emit_erase(out, shell, name),
-        }
-    }
-    emit_erase(out, shell, GEN_VAR);
-    emit_erase(out, shell, STATE_VAR);
+    render(shell, &unload_changes(state, base))
 }
 
 fn emit_set(out: &mut String, shell: Shell, name: &str, value: &str) {
@@ -197,18 +228,32 @@ mod tests {
     }
 
     #[test]
+    fn apply_changes_returns_data_for_direnv_json() {
+        let base = env(&[("PATH", "/usr/bin"), ("FOO", "old")]);
+        let changes = apply_changes(&profile(), &base, None);
+        assert_eq!(changes["PATH"], Some("/nix/bin:/usr/bin".to_string()));
+        assert_eq!(changes["FOO"], Some("has 'quotes'\nand lines".to_string()));
+        assert!(changes[STATE_VAR].is_some());
+        // A state round trip carries the saved baseline.
+        let state: SessionState =
+            serde_json::from_str(changes[STATE_VAR].as_ref().unwrap()).unwrap();
+        assert_eq!(state.saved["FOO"], "old");
+    }
+
+    #[test]
     fn unload_restores_saved_and_erases_new() {
         let base = env(&[("PATH", "/usr/bin"), ("FOO", "old")]);
-        let script = apply_script(Shell::Fish, &profile(), &base, None);
-        let state: SessionState = serde_json::from_str(
-            script.lines().last().unwrap().split_once("__SIMMER_STATE ").unwrap().1
-                .trim_matches('\'').replace(r"\'", "'").replace(r"\\", "\\").as_str(),
-        )
-        .unwrap();
-        let unload = unload_script(Shell::Fish, &state, &base);
-        assert!(unload.contains("set -gx FOO 'old'"));
-        assert!(unload.contains("set -gx PATH '/usr/bin'"));
-        assert!(unload.contains("set -e SIMMER_GEN"));
+        let changes = apply_changes(&profile(), &base, None);
+        let state: SessionState =
+            serde_json::from_str(changes[STATE_VAR].as_ref().unwrap()).unwrap();
+        let unload = unload_changes(&state, &base);
+        assert_eq!(unload["FOO"], Some("old".to_string()));
+        assert_eq!(unload["PATH"], Some("/usr/bin".to_string()));
+        assert_eq!(unload[GEN_VAR], None);
+        assert_eq!(unload[STATE_VAR], None);
+        let script = render(Shell::Fish, &unload);
+        assert!(script.contains("set -gx FOO 'old'"));
+        assert!(script.contains("set -e SIMMER_GEN"));
     }
 
     #[test]
