@@ -51,13 +51,15 @@
           mainProgram = "simmer";
         };
       };
-      # A `direnv`-named wrapper: editors and tools that shell out to
-      # direnv (VSCode/Zed/Emacs plugins, `direnv exec` launchers) reach
-      # simmer for trusted projects and are delegated to the real direnv
-      # otherwise. Install with priority over pkgs.direnv.
-      direnv-shim = pkgs.writeShellScriptBin "direnv" ''
-        export SIMMER_DIRENV_FALLBACK=''${SIMMER_DIRENV_FALLBACK:-${pkgs.direnv}/bin/direnv}
-        exec ${simmer}/bin/simmer direnv "$@"
+      # A `direnv`-named symlink to the simmer binary (busybox pattern —
+      # argv[0] routes into the shim, no wrapper exec): editors and tools
+      # that shell out to direnv (VSCode/Zed/Emacs plugins, `direnv exec`
+      # launchers) reach simmer for trusted projects and are delegated to
+      # the real direnv otherwise ($SIMMER_DIRENV_FALLBACK, or the first
+      # non-shim direnv on PATH). Install with priority over pkgs.direnv.
+      direnv-shim = pkgs.runCommand "simmer-direnv-shim" {} ''
+        mkdir -p $out/bin
+        ln -s ${simmer}/bin/simmer $out/bin/direnv
       '';
     in {
       default = simmer;

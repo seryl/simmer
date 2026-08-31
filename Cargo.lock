@@ -412,6 +412,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
  "notify",
  "serde_json",
  "simmer-core",

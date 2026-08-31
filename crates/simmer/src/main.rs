@@ -87,6 +87,28 @@ enum Cmd {
 }
 
 fn main() {
+    // Rust ignores SIGPIPE; a consumer closing the pipe early (`head`,
+    // an editor reading a prefix) must end us quietly like any CLI, not
+    // panic mid-println.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
+    // Busybox pattern: a `direnv`-named symlink to this binary routes
+    // straight into the shim — no shell wrapper, no extra exec.
+    let invoked_as = std::env::args().next().unwrap_or_default();
+    if std::path::Path::new(&invoked_as)
+        .file_name()
+        .is_some_and(|n| n == "direnv")
+    {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if let Err(e) = direnv_shim::run(&args) {
+            eprintln!("simmer(direnv): {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let cli = Cli::parse();
     let result = match cli.command {
         Cmd::Export { shell, dir, no_warm } => cmd_export(&shell, dir, no_warm),

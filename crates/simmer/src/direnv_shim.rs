@@ -3,10 +3,12 @@
 //! Editors and tools shell out to `direnv` directly (VSCode/Zed/Emacs
 //! plugins run `direnv export json`; launchers use `direnv exec`), which
 //! would bypass simmer entirely. The install ships a `direnv`-named
-//! wrapper that execs `simmer direnv "$@"`: trusted projects get simmer's
-//! cached environment, everything else is transparently delegated to the
-//! real direnv named by `$SIMMER_DIRENV_FALLBACK` — so unmigrated
-//! projects keep working in editors during the transition, per-project.
+//! symlink to the simmer binary (argv[0] routing in main — no wrapper,
+//! no extra exec): trusted projects get simmer's cached environment,
+//! everything else is transparently delegated to the real direnv
+//! (`$SIMMER_DIRENV_FALLBACK`, else the first non-shim direnv on PATH) —
+//! so unmigrated projects keep working in editors during the
+//! transition, per-project.
 
 use anyhow::{bail, Context, Result};
 use simmer_core::{
@@ -171,19 +173,39 @@ fn version(min: Option<&str>) -> Result<()> {
 }
 
 fn delegate(args: &[String]) -> Result<()> {
-    let fallback = std::env::var("SIMMER_DIRENV_FALLBACK").ok().filter(|f| {
-        // Never re-exec ourselves if the wrapper is misconfigured.
-        std::fs::metadata(f).is_ok()
-    });
-    match fallback {
+    match real_direnv() {
         Some(direnv) => {
             Err(std::process::Command::new(direnv).args(args).exec())
                 .context("delegating to real direnv")
         }
         None => bail!(
             "'direnv {}' is not supported by the simmer shim and no real direnv is \
-             available (set SIMMER_DIRENV_FALLBACK)",
+             available (set SIMMER_DIRENV_FALLBACK or install direnv)",
             args.first().map(String::as_str).unwrap_or("")
         ),
     }
+}
+
+/// The genuine direnv to delegate to: $SIMMER_DIRENV_FALLBACK, or the
+/// first `direnv` on PATH that is not this binary (the shim is a
+/// `direnv`-named symlink, so a naive lookup would find ourselves).
+fn real_direnv() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("SIMMER_DIRENV_FALLBACK") {
+        let path = PathBuf::from(explicit);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let own = std::env::current_exe().ok().and_then(|p| p.canonicalize().ok());
+    for dir in std::env::split_paths(&std::env::var_os("PATH")?) {
+        let candidate = dir.join("direnv");
+        if !candidate.is_file() {
+            continue;
+        }
+        if candidate.canonicalize().ok() == own {
+            continue;
+        }
+        return Some(candidate);
+    }
+    None
 }
