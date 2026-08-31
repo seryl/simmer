@@ -65,6 +65,58 @@ impl Cache {
         Ok(())
     }
 
+    /// Watches discovered during the last warm (`watch_file` calls in
+    /// .envrc), absolute paths. Missing file = no dynamic watches.
+    pub fn dynamic_watches(&self) -> Vec<PathBuf> {
+        let Ok(text) = std::fs::read_to_string(self.dir.join("watches")) else {
+            return Vec::new();
+        };
+        text.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect()
+    }
+
+    pub fn store_dynamic_watches(&self, watches: &[PathBuf]) -> Result<()> {
+        let tmp = self.dir.join("watches.tmp");
+        let text: String =
+            watches.iter().map(|w| format!("{}\n", w.display())).collect();
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, self.dir.join("watches"))?;
+        Ok(())
+    }
+
+    /// Trust model: nothing is warmed or applied for a project until a
+    /// human allowed it (running code from a just-cloned repo is direnv's
+    /// one non-negotiable lesson). For `.envrc` projects trust is bound to
+    /// the file's content — editing it revokes trust, like direnv. For
+    /// flake-only projects trust sticks to the root: flake edits are
+    /// routine and re-prompting would neuter the pre-warm daemon (the
+    /// hook still runs through nix's evaluator rather than raw bash).
+    pub fn trusted(&self, project: &Project) -> bool {
+        let Ok(record) = std::fs::read_to_string(self.dir.join("trust")) else {
+            return false;
+        };
+        match project.envrc_hash() {
+            Some(hash) => record == format!("envrc:{hash}"),
+            None => record == "root",
+        }
+    }
+
+    pub fn allow(&self, project: &Project) -> Result<()> {
+        let record = match project.envrc_hash() {
+            Some(hash) => format!("envrc:{hash}"),
+            None => "root".to_string(),
+        };
+        std::fs::write(self.dir.join("trust"), record)?;
+        Ok(())
+    }
+
+    pub fn deny(&self) -> Result<()> {
+        match std::fs::remove_file(self.dir.join("trust")) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).context("removing trust record"),
+        }
+    }
+
     /// Take the warm lock. Returns None while another warm holds a lock
     /// younger than 15 minutes; stale locks (crashed warms) are broken.
     pub fn try_lock_warm(&self) -> Result<Option<WarmLock>> {

@@ -49,7 +49,15 @@ pub fn run() -> Result<()> {
                     continue;
                 }
                 match Project::at(&root) {
-                    Ok(project) => {
+                    Ok(mut project) => {
+                        // The daemon executes project code; untrusted
+                        // projects stay untracked until `simmer allow`.
+                        let Ok(cache) = Cache::for_project(&project) else { continue };
+                        if !cache.trusted(&project) {
+                            known.remove(&root); // re-check next rescan
+                            continue;
+                        }
+                        project.extend_watches(cache.dynamic_watches());
                         for file in &project.watched {
                             let path = root.join(file);
                             // Watch the parent directory: editors replace
@@ -102,8 +110,12 @@ pub fn run() -> Result<()> {
 }
 
 fn rewarm_if_stale(root: &PathBuf) -> Result<()> {
-    let project = Project::at(root)?;
+    let mut project = Project::at(root)?;
     let cache = Cache::for_project(&project)?;
+    if !cache.trusted(&project) {
+        return Ok(()); // trust revoked (or .envrc edited) since tracking began
+    }
+    project.extend_watches(cache.dynamic_watches());
     let generation = project.generation()?;
     if cache.load().is_some_and(|p| p.generation == generation) {
         return Ok(());

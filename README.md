@@ -3,33 +3,82 @@
 Instant Nix devshells: evaluate once, keep it simmering, replay natively
 into fish/bash/zsh in microseconds.
 
-Replaces the direnv + nix-direnv + devshell-framework load path for flake
-projects. Design rationale and the measurements that motivated it:
+A standalone replacement for the direnv + nix-direnv load path. Projects
+declare themselves with a `.simmer.toml` (preferred) or keep their
+existing direnv `.envrc` — both run through the same engine. Platform
+design (including where this is headed beyond shells):
 `the design notes`.
 
 ## How it works
 
 Two paths, nothing else:
 
-- **Warm** (rare — a watched file changed): `nix print-dev-env --json`,
-  run the shellHook once in a scrubbed bash harness, run declared
-  providers, diff the result against a deterministic baseline, cache the
-  final environment keyed by a content hash of the watched files. A
-  `--profile` GC root pins the closure.
+- **Warm** (rare — a watched file changed): assemble the environment once
+  in a scrubbed bash harness — `use_flake` evals `nix print-dev-env`
+  output, dotenv/PATH/env lines from the manifest, then providers — and
+  cache the captured result, keyed by a content hash of the watched
+  files. A `--profile` GC root pins the closure.
 - **Export** (every prompt): compare generation hashes, emit native shell
-  code only when something changed. No bash, no nix, no subprocesses.
-  Measured ~0.2ms.
+  code only when something changed. No bash, no nix, no subprocesses;
+  measured well under a millisecond.
 
-Environments from any flake devShell work unchanged (`mkShell`, numtide
-devshell, std) because everything flows through `print-dev-env`. Caching
-is content-hash based and deliberately independent of Nix's eval cache,
-which dirty git trees silently disable.
+The daemon has **no IPC**: the disk cache is the interface. It re-warms
+registered projects the moment a watched file changes, so the
+multi-second eval happens when you *save*, not when you next open a
+shell; meanwhile `export` serves the previous environment rather than
+ever blocking a prompt.
 
-The daemon has **no IPC**: the disk cache is the interface. It watches
-registered projects (anything you've warmed) and re-warms the moment a
-watched file changes — the multi-second eval happens when you save
-flake.nix, not when you next open a shell. Meanwhile `export` serves the
-previous environment rather than ever blocking a prompt.
+## Trust
+
+Nothing is executed or applied for a project until you allow it:
+
+```bash
+simmer allow    # or: simmer warm (implicit allow, it's an explicit action)
+simmer deny     # revoke; simmer goes inert for the project
+```
+
+For `.envrc` projects trust is bound to the file's content — editing it
+revokes trust, exactly like direnv. For flake/manifest projects trust
+sticks to the root (flake edits are routine; the daemon must be able to
+pre-warm them).
+
+`simmer allow` is also the **migration switch**: until you allow a
+project, simmer stays inert and direnv (if hooked) keeps owning it. No
+repo changes, reversible per project.
+
+## `.simmer.toml` (preferred)
+
+```toml
+# Which environment to load; defaults to "." when flake.nix exists, so a
+# bare flake project needs no manifest at all.
+flake = ".#dev"
+
+# Extra files whose content defines the env (shells imported from other
+# files are silently stale without this).
+watch = ["nix/shells/dev.nix"]
+
+# Declarative equivalents of the common .envrc lines:
+dotenv = [".env.local"]
+path = ["bin", "scripts"]
+[env]
+DATABASE_URL = "postgres://localhost/dev"
+
+# Commands whose stdout becomes an exported variable, run once at warm
+# time in the finished environment.
+[[provider]]
+env = "CUDA_COMPUTE_CAP"
+command = "nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d ."
+invalidate = "boot"   # re-run after reboot; default is "generation"
+```
+
+## `.envrc` compatibility
+
+An allowed `.envrc` runs in the warm harness against a direnv-compatible
+stdlib subset: `use flake` / `use nix`, `PATH_add`, `dotenv`,
+`source_env`, `source_up`, `watch_file` (feeds simmer's invalidation),
+`env_vars_required`, and friends. `layout` is unsupported (loud warning).
+The repo needs no changes; teammates keep using direnv against the same
+file.
 
 ## Use
 
@@ -40,7 +89,7 @@ simmer hook fish | source
 
 ```bash
 # bash/zsh config:
-eval "$(simmer hook bash)"   # or zsh
+eval "$(simmer hook bash)"     # or zsh
 
 # CI / one-off:
 eval "$(simmer export bash)"
@@ -53,58 +102,40 @@ systemctl --user enable --now simmer
 simmer doctor
 ```
 
-Do not run direnv's nix integration and the simmer hook on the same
-project — two systems fighting over the same variables. `simmer doctor`
-warns about this.
-
-## simmer.toml
-
-```toml
-# Files beyond flake.{nix,lock} whose content defines the env. Flakes
-# that import their shell from another file are silently stale otherwise.
-watch = ["nix/shells/dev.nix"]
-
-# Declarative replacements for imperative shellHook probing: runs once at
-# warm time in the post-hook environment, stdout becomes an exported var.
-[[provider]]
-env = "CUDA_COMPUTE_CAP"
-command = "nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d ."
-invalidate = "boot"   # re-run after reboot; default is "generation"
-```
-
-## Measured (dev machine, 2026-08-30)
+## Measured (dev machine, 2026-08-30/31)
 
 | Path | direnv + nix-direnv | simmer |
 |---|---|---|
-| Prompt, env current | 350–700 ms | **~0.2 ms** |
-| Enter project, cache warm | 350–700 ms | ~15 ms |
+| Prompt, env current | 4 ms | **~0.2 ms** (cheaper than spawning `/bin/true`) |
+| Entering a project | 110–700 ms load event | ~2 ms |
 | Watched file changed | 10–16 s, blocks next entry | daemon pre-warms on save; prompt never blocks |
 
 ## Layout
 
-- `crates/simmer-core` — library: env spec parsing, warm harness, profile
-  diffing, per-shell compilers, cache, registry, config.
+- `crates/simmer-core` — library: warm harness + shim, profile diffing,
+  per-shell compilers, cache, trust, registry, manifest.
 - `crates/simmer` — CLI: `export`, `warm`, `hook`, `status`, `daemon`,
-  `doctor`.
+  `doctor`, `allow`, `deny`.
 
 ## Design notes
 
-- The cached artifact is the **post-shellHook** environment: frameworks
-  emit sentinels (`PATH=/path-not-set`) in the JSON and build the real
-  env imperatively in the hook, so only the hook's output is worth
-  replaying.
+- The cached artifact is the **post-hook** environment; frameworks emit
+  sentinels (`PATH=/path-not-set`) and build the real env imperatively,
+  so only the finished product is worth replaying.
 - The warm harness scrubs its inherited environment (HOME/PATH/TERM/LANG
   only) so profiles are deterministic wherever the warm ran.
-- Session state (saved variables, set list) rides in `__SIMMER_STATE`
-  inside the shell itself, so unload needs no cache access and survives
-  cache GCs.
+- Session state rides in `__SIMMER_STATE` inside the shell itself;
+  unload needs no cache access.
 - `PATH`/`XDG_DATA_DIRS` are stored as nix-prefix + caller-tail and
   re-merged against the *current* caller value at export time.
+- Generations are content hashes over static ∪ dynamic watches —
+  deliberately independent of Nix's eval cache, which dirty git trees
+  silently disable.
 
-## Roadmap
+## Roadmap (see the platform design doc)
 
-- Nix-side flake module emitting `env.json` directly (skip the
-  `print-dev-env` bash round trip; menus/commands as data).
-- Provider outputs beyond env vars (generated files with content-diff
-  writes).
-- macOS boot-scoped invalidation (`kern.boottime`).
+- `nix-simmer`: a `use simmer` library for people staying on direnv —
+  shared cache, no more blocking reloads.
+- `simmer.nix` flake module emitting `env.json` directly.
+- `simmer-deploy`: the same kernel at host scope (pull-based NixOS
+  reconciliation with pre-built generations and health-gated rollback).

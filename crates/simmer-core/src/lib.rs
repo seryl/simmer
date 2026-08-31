@@ -23,7 +23,6 @@
 pub mod cache;
 pub mod compile;
 pub mod config;
-pub mod envspec;
 pub mod profile;
 pub mod project;
 pub mod registry;

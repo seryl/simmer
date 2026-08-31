@@ -63,6 +63,18 @@ enum Cmd {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// Trust this project: simmer may execute its .envrc / shellHook /
+    /// providers. For .envrc projects trust is bound to the file content
+    /// (edits revoke it, like direnv).
+    Allow {
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Revoke trust; simmer goes inert for this project.
+    Deny {
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -78,6 +90,8 @@ fn main() {
         }
         Cmd::Daemon { .. } => daemon::run(),
         Cmd::Doctor { dir } => cmd_doctor(dir),
+        Cmd::Allow { dir } => cmd_allow(dir, true),
+        Cmd::Deny { dir } => cmd_allow(dir, false),
     };
     if let Err(e) = result {
         // The hook pipes stdout into `source`; errors must stay on stderr
@@ -100,7 +114,7 @@ fn cmd_export(shell: &str, dir: Option<PathBuf>, no_warm: bool) -> Result<()> {
     let state = compile::read_state(&current);
     let dir = resolve_dir(dir)?;
 
-    let Some(project) = Project::discover(&dir) else {
+    let Some(mut project) = Project::discover(&dir) else {
         // Left the project: tear the session down against what the shell
         // held before we touched it.
         if let Some(state) = &state {
@@ -110,17 +124,20 @@ fn cmd_export(shell: &str, dir: Option<PathBuf>, no_warm: bool) -> Result<()> {
         return Ok(());
     };
 
-    // Coexistence guard: a nix-flavored .envrc means direnv owns this
-    // project — two systems applying and reverting the same variables
-    // corrupts both. Switching a project to simmer = removing its .envrc.
-    // Silent (this runs on every prompt); `simmer doctor` explains it.
-    if let Ok(envrc) = std::fs::read_to_string(project.root.join(".envrc")) {
-        if envrc.contains("use flake") || envrc.contains("use nix") {
-            return Ok(());
-        }
-    }
-
     let cache = Cache::for_project(&project)?;
+    // Trust gate: an untrusted project is not simmer's to manage — no
+    // code execution, no application; any lingering session unloads.
+    // Until `simmer allow`, direnv (or nothing) owns it, which is also
+    // the coexistence story: allow is the per-project migration switch.
+    // Silent (this runs on every prompt); `simmer doctor` explains it.
+    if !cache.trusted(&project) {
+        if let Some(state) = &state {
+            let base = compile::effective_env(&current, Some(state));
+            print!("{}", compile::unload_script(shell, state, &base));
+        }
+        return Ok(());
+    }
+    project.extend_watches(cache.dynamic_watches());
     let generation = project.generation()?;
     let cached_generation = cache.cached_generation();
 
@@ -168,9 +185,13 @@ fn spawn_background_warm(project: &Project) -> Result<()> {
 
 fn cmd_warm(dir: Option<PathBuf>) -> Result<()> {
     let dir = resolve_dir(dir)?;
-    let project = Project::discover(&dir)
-        .with_context(|| format!("no flake.nix found above {}", dir.display()))?;
+    let project = Project::discover(&dir).with_context(|| {
+        format!("no project root (flake.nix, .envrc, or .simmer.toml) above {}", dir.display())
+    })?;
     let cache = Cache::for_project(&project)?;
+    // Running `simmer warm` in a project is an explicit human action
+    // there — it grants trust, like `direnv allow`.
+    cache.allow(&project)?;
     let Some(_lock) = cache.try_lock_warm()? else {
         eprintln!("simmer: another warm is already running for this project");
         return Ok(());
@@ -182,6 +203,22 @@ fn cmd_warm(dir: Option<PathBuf>) -> Result<()> {
         profile.vars.len(),
         profile.warm_ms
     );
+    Ok(())
+}
+
+fn cmd_allow(dir: Option<PathBuf>, allow: bool) -> Result<()> {
+    let dir = resolve_dir(dir)?;
+    let project = Project::discover(&dir).with_context(|| {
+        format!("no project root (flake.nix, .envrc, or .simmer.toml) above {}", dir.display())
+    })?;
+    let cache = Cache::for_project(&project)?;
+    if allow {
+        cache.allow(&project)?;
+        eprintln!("simmer: {} allowed", project.root.display());
+    } else {
+        cache.deny()?;
+        eprintln!("simmer: {} denied — simmer is now inert here", project.root.display());
+    }
     Ok(())
 }
 
@@ -217,12 +254,14 @@ fn cmd_status(dir: Option<PathBuf>) -> Result<()> {
     let state = compile::read_state(&current);
     let status = match Project::discover(&dir) {
         None => serde_json::json!({ "project": null, "session": state.map(|s| s.generation) }),
-        Some(project) => {
+        Some(mut project) => {
             let cache = Cache::for_project(&project)?;
+            project.extend_watches(cache.dynamic_watches());
             let generation = project.generation()?;
             let profile = cache.load();
             serde_json::json!({
                 "project": project.root,
+                "trusted": cache.trusted(&project),
                 "watched": project.watched,
                 "generation": generation,
                 "cached_generation": profile.as_ref().map(|p| p.generation.clone()),
@@ -242,31 +281,35 @@ fn cmd_doctor(dir: Option<PathBuf>) -> Result<()> {
     let current: BTreeMap<String, String> = std::env::vars().collect();
     let mut warnings: Vec<String> = Vec::new();
 
-    let Some(project) = Project::discover(&dir) else {
+    let Some(mut project) = Project::discover(&dir) else {
         println!(
             "{}",
-            serde_json::json!({ "project": null, "warnings": ["no flake.nix found upward"] })
+            serde_json::json!({ "project": null, "warnings": ["no project root (flake.nix, .envrc, or .simmer.toml) found upward"] })
         );
         return Ok(());
     };
 
-    // direnv managing the same project would fight the hook: two systems
-    // applying and reverting the same variables.
-    let envrc = project.root.join(".envrc");
-    if let Ok(text) = std::fs::read_to_string(&envrc) {
-        if text.contains("use flake") || text.contains("use nix") {
-            warnings.push(
-                ".envrc uses direnv's nix integration — run either direnv or the simmer hook \
-                 on this project, not both"
-                    .to_string(),
-            );
-        }
+    let cache = Cache::for_project(&project)?;
+    let trusted = cache.trusted(&project);
+    if !trusted {
+        warnings.push(
+            "project is not trusted — simmer is inert here until `simmer allow` (or `simmer warm`); \
+             if direnv manages this project, that is the correct state until you migrate"
+                .to_string(),
+        );
+    }
+    if trusted && project.envrc_path().is_some() && std::env::var_os("DIRENV_DIR").is_some() {
+        warnings.push(
+            "both simmer (allowed) and direnv appear active — pick one: `simmer deny` here, \
+             or remove the direnv hook for this project"
+                .to_string(),
+        );
     }
     if !registry::list().iter().any(|r| *r == project.root) {
         warnings.push("project not yet registered (run `simmer warm` once) — the daemon will not pre-warm it".to_string());
     }
 
-    let cache = Cache::for_project(&project)?;
+    project.extend_watches(cache.dynamic_watches());
     let generation = project.generation()?;
     let profile = cache.load();
 
@@ -288,6 +331,7 @@ fn cmd_doctor(dir: Option<PathBuf>) -> Result<()> {
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
             "project": project.root,
+            "trusted": trusted,
             "watched": project.watched,
             "providers": project.config.providers.iter().map(|p| &p.env).collect::<Vec<_>>(),
             "generation": generation,

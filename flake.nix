@@ -26,13 +26,24 @@
     craneFor = system:
       (crane.mkLib nixpkgs.legacyPackages.${system})
       .overrideToolchain fenix.packages.${system}.stable.minimalToolchain;
+
+    # crane's default filter keeps only Cargo-relevant files; the warm
+    # harness shim is embedded via include_str!("shim.bash") and must
+    # survive too.
+    srcFor = craneLib:
+      nixpkgs.lib.cleanSourceWith {
+        src = ./.;
+        filter = path: type:
+          craneLib.filterCargoSources path type
+          || builtins.match ".*\\.bash$" path != null;
+      };
   in {
     packages = forSystems (system: let
       craneLib = craneFor system;
       simmer = craneLib.buildPackage {
         pname = "simmer";
         version = "0.1.0";
-        src = craneLib.cleanCargoSource ./.;
+        src = srcFor craneLib;
         strictDeps = true;
         meta = {
           description = "Instant Nix devshells: cached environments replayed natively into fish/bash/zsh";
@@ -46,7 +57,7 @@
 
     checks = forSystems (system: let
       craneLib = craneFor system;
-      src = craneLib.cleanCargoSource ./.;
+      src = srcFor craneLib;
       cargoArtifacts = craneLib.buildDepsOnly {inherit src;};
     in {
       clippy = craneLib.cargoClippy {
