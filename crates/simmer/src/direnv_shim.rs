@@ -18,7 +18,7 @@ use simmer_core::{
 };
 use std::collections::BTreeMap;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// direnv version the shim claims. Plugins gate features with
 /// `direnv version <min>`; this must stay >= what common plugins require.
@@ -55,7 +55,7 @@ enum Outcome {
     Delegate,
 }
 
-fn resolve(dir: &PathBuf) -> Result<Outcome> {
+fn resolve(dir: &Path) -> Result<Outcome> {
     let current: BTreeMap<String, String> = std::env::vars().collect();
     let state = compile::read_state(&current);
 

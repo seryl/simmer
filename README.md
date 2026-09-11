@@ -13,11 +13,17 @@ design (including where this is headed beyond shells):
 
 Two paths, nothing else:
 
-- **Warm** (rare — a watched file changed): assemble the environment once
-  in a scrubbed bash harness — `use_flake` evals `nix print-dev-env`
-  output, dotenv/PATH/env lines from the manifest, then providers — and
-  cache the captured result, keyed by a content hash of the watched
-  files. A `--profile` GC root pins the closure.
+- **Warm** (rare — a watched file changed): build the environment once
+  and cache the captured result, keyed by a content hash of the watched
+  files. A `--profile` GC root pins the closure. Two ways to build it:
+  - **native** — the devshell derivation ships an `env.json` (see
+    below): one `nix build`, then the variables, providers and generated
+    config files are materialized in Rust. No bash is sourced.
+  - **harness** — any other flake shell or a `.envrc`: `use_flake` evals
+    `nix print-dev-env` output in a scrubbed bash harness, then
+    dotenv/PATH/env lines from the manifest, then providers.
+  An explicit `simmer warm` probes native first and remembers the answer;
+  the daemon reuses it.
 - **Export** (every prompt): compare generation hashes, emit native shell
   code only when something changed. No bash, no nix, no subprocesses;
   measured well under a millisecond.
@@ -27,6 +33,32 @@ registered projects the moment a watched file changes, so the
 multi-second eval happens when you *save*, not when you next open a
 shell; meanwhile `export` serves the previous environment rather than
 ever blocking a prompt.
+
+## `env.json` — environments as data
+
+A devshell that exports an `env.json` next to its profile is warmed
+without running any of its bash. The schema (`simmer_core::envspec`,
+closed — unknown fields are errors):
+
+```json
+{ "schema": 1, "name": "dev", "system": "x86_64-linux",
+  "profile": "/nix/store/...-dev-profile",
+  "vars": { "PATH": { "kind": "prefix", "value": "/nix/store/...-dev-profile/bin" },
+            "PRJ_ROOT": { "kind": "root" }, "FOO": { "kind": "set", "value": "1" } },
+  "commands": [ { "name": "fmt", "help": "format", "category": "code",
+                  "run": { "kind": "script", "source": "/nix/store/.../bin/fmt" } } ],
+  "configs":  [ { "output": ".rustfmt.toml", "source": "/nix/store/...", "mode": "link" } ],
+  "providers": [ { "env": "CUDA_COMPUTE_CAP", "command": "nvidia-smi ...", "invalidate": "boot" } ] }
+```
+
+`vars` kinds: `set`, `prefix` (merged in front of the caller's value),
+`unset`, `root` (the project root, never stored). `configs` are linked
+(or copied, or template-substituted with `@VAR@` / `@VAR:-default@`) into
+the project at warm time and listed in a marked block of `.gitignore`;
+the GC root keeps their sources alive, so a linked config can no longer
+dangle after `nix store gc`. `providers` declared here run like manifest providers.
+The buildenv framework (`a consuming project`) emits this
+from a pure-data shell declaration.
 
 ## Trust
 
@@ -112,8 +144,9 @@ simmer doctor
 
 ## Layout
 
-- `crates/simmer-core` — library: warm harness + shim, profile diffing,
-  per-shell compilers, cache, trust, registry, manifest.
+- `crates/simmer-core` — library: warm (native env.json + bash harness
+  and shim), envspec, configs, profile diffing, per-shell compilers,
+  cache, trust, registry, manifest.
 - `crates/simmer` — CLI: `export`, `warm`, `hook`, `status`, `daemon`,
   `doctor`, `allow`, `deny`.
 
@@ -132,10 +165,11 @@ simmer doctor
   deliberately independent of Nix's eval cache, which dirty git trees
   silently disable.
 
-## Roadmap (see the platform design doc)
+## Roadmap
 
 - `nix-simmer`: a `use simmer` library for people staying on direnv —
   shared cache, no more blocking reloads.
-- `simmer.nix` flake module emitting `env.json` directly.
 - `simmer-deploy`: the same kernel at host scope (pull-based NixOS
   reconciliation with pre-built generations and health-gated rollback).
+- Done: `env.json` native warm mode (2026-09-10); the flake side lives in
+  buildenv.

@@ -46,6 +46,10 @@ pub struct EnvProfile {
     pub vars: BTreeMap<String, Value>,
     /// Wall-clock milliseconds the warm run took — surfaced by `doctor`.
     pub warm_ms: u64,
+    /// How the profile was produced: `native` (env.json) or `harness`
+    /// (bash + print-dev-env). Absent in profiles from older versions.
+    #[serde(default)]
+    pub mode: String,
 }
 
 impl EnvProfile {
@@ -84,7 +88,7 @@ impl EnvProfile {
             };
             vars.insert(name, entry);
         }
-        EnvProfile { generation, root, vars, warm_ms }
+        EnvProfile { generation, root, vars, warm_ms, mode: String::new() }
     }
 }
 

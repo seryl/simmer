@@ -208,6 +208,7 @@ mod tests {
                 ),
             ]),
             warm_ms: 0,
+            mode: String::new(),
         }
     }
 

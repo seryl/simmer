@@ -16,6 +16,9 @@ pub struct Project {
     pub config: Config,
     /// Watched files that exist right now, relative to `root`.
     pub watched: Vec<PathBuf>,
+    /// Whether the generation also keys on the kernel boot id — true when
+    /// a provider (manifest or shell-declared) probes per-boot state.
+    pub boot_scoped: bool,
 }
 
 impl Project {
@@ -47,7 +50,8 @@ impl Project {
             .collect();
         watched.sort();
         watched.dedup();
-        Ok(Project { root: root.to_path_buf(), config, watched })
+        let boot_scoped = config.boot_scoped();
+        Ok(Project { root: root.to_path_buf(), config, watched, boot_scoped })
     }
 
     /// Fold in watches discovered by a previous warm (absolute paths from
@@ -57,6 +61,13 @@ impl Project {
         self.watched.extend(extra);
         self.watched.sort();
         self.watched.dedup();
+    }
+
+    /// Fold in boot scoping recorded by a previous warm (a native shell's
+    /// own providers). Like [`Self::extend_watches`], apply before
+    /// [`Self::generation`].
+    pub fn extend_boot_scoped(&mut self, boot_scoped: bool) {
+        self.boot_scoped |= boot_scoped;
     }
 
     pub fn envrc_path(&self) -> Option<PathBuf> {
@@ -91,7 +102,7 @@ impl Project {
                 Err(_) => hasher.update(b"<simmer:absent>"),
             }
         }
-        if self.config.boot_scoped() {
+        if self.boot_scoped {
             hasher.update([0]);
             hasher.update(boot_id().as_bytes());
         }

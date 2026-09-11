@@ -83,6 +83,30 @@ impl Cache {
         Ok(())
     }
 
+    /// Warm mode the last warm settled on (`native` / `harness`), so the
+    /// daemon does not speculatively `nix build` a harness project on
+    /// every save. Absent until the first warm.
+    pub fn warm_mode(&self) -> Option<String> {
+        let mode = std::fs::read_to_string(self.dir.join("mode")).ok()?;
+        (!mode.is_empty()).then_some(mode)
+    }
+
+    pub fn store_warm_mode(&self, mode: &str) -> Result<()> {
+        std::fs::write(self.dir.join("mode"), mode)?;
+        Ok(())
+    }
+
+    /// Whether the shell itself declared a boot-scoped provider — part of
+    /// the generation, so `export` must know it without reading env.json.
+    pub fn boot_scoped(&self) -> bool {
+        std::fs::read_to_string(self.dir.join("boot-scoped")).is_ok_and(|s| s == "1")
+    }
+
+    pub fn store_boot_scoped(&self, boot_scoped: bool) -> Result<()> {
+        std::fs::write(self.dir.join("boot-scoped"), if boot_scoped { "1" } else { "0" })?;
+        Ok(())
+    }
+
     /// Trust model: nothing is warmed or applied for a project until a
     /// human allowed it (running code from a just-cloned repo is direnv's
     /// one non-negotiable lesson). For `.envrc` projects trust is bound to

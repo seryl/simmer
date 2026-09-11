@@ -170,6 +170,7 @@ fn cmd_export(shell: &str, dir: Option<PathBuf>, no_warm: bool) -> Result<()> {
         return Ok(());
     }
     project.extend_watches(cache.dynamic_watches());
+    project.extend_boot_scoped(cache.boot_scoped());
     let generation = project.generation()?;
     let cached_generation = cache.cached_generation();
 
@@ -230,10 +231,11 @@ fn cmd_warm(dir: Option<PathBuf>) -> Result<()> {
     };
     let profile = warm::warm(&project, &cache)?;
     eprintln!(
-        "simmer: warmed {} ({} vars, {}ms)",
+        "simmer: warmed {} ({} vars, {}ms, {})",
         project.root.display(),
         profile.vars.len(),
-        profile.warm_ms
+        profile.warm_ms,
+        profile.mode
     );
     Ok(())
 }
@@ -289,11 +291,13 @@ fn cmd_status(dir: Option<PathBuf>) -> Result<()> {
         Some(mut project) => {
             let cache = Cache::for_project(&project)?;
             project.extend_watches(cache.dynamic_watches());
+            project.extend_boot_scoped(cache.boot_scoped());
             let generation = project.generation()?;
             let profile = cache.load();
             serde_json::json!({
                 "project": project.root,
                 "trusted": cache.trusted(&project),
+                "mode": profile.as_ref().map(|p| p.mode.clone()),
                 "watched": project.watched,
                 "generation": generation,
                 "cached_generation": profile.as_ref().map(|p| p.generation.clone()),
@@ -337,11 +341,12 @@ fn cmd_doctor(dir: Option<PathBuf>) -> Result<()> {
                 .to_string(),
         );
     }
-    if !registry::list().iter().any(|r| *r == project.root) {
+    if !registry::list().contains(&project.root) {
         warnings.push("project not yet registered (run `simmer warm` once) — the daemon will not pre-warm it".to_string());
     }
 
     project.extend_watches(cache.dynamic_watches());
+    project.extend_boot_scoped(cache.boot_scoped());
     let generation = project.generation()?;
     let profile = cache.load();
 
@@ -368,6 +373,8 @@ fn cmd_doctor(dir: Option<PathBuf>) -> Result<()> {
             "providers": project.config.providers.iter().map(|p| &p.env).collect::<Vec<_>>(),
             "generation": generation,
             "fresh": profile.as_ref().map(|p| p.generation == generation).unwrap_or(false),
+            "mode": profile.as_ref().map(|p| p.mode.clone()),
+            "native_installable": warm::native_installable(&project),
             "last_warm_ms": profile.as_ref().map(|p| p.warm_ms),
             "export_cost_us": export_us,
             "apply_script_bytes": compiled_bytes,

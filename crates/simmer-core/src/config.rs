@@ -27,7 +27,7 @@
 //! `simmer.toml` (undotted) is accepted as a fallback spelling.
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -53,7 +53,7 @@ pub struct Config {
     pub providers: Vec<Provider>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Provider {
     /// Exported variable the provider's stdout populates.
@@ -65,7 +65,7 @@ pub struct Provider {
     pub invalidate: Invalidate,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Invalidate {
     /// Re-run only when the generation (watched files) changes.

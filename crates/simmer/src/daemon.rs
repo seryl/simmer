@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use simmer_core::{cache::Cache, project::Project, registry, warm};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -109,13 +109,14 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-fn rewarm_if_stale(root: &PathBuf) -> Result<()> {
+fn rewarm_if_stale(root: &Path) -> Result<()> {
     let mut project = Project::at(root)?;
     let cache = Cache::for_project(&project)?;
     if !cache.trusted(&project) {
         return Ok(()); // trust revoked (or .envrc edited) since tracking began
     }
     project.extend_watches(cache.dynamic_watches());
+    project.extend_boot_scoped(cache.boot_scoped());
     let generation = project.generation()?;
     if cache.load().is_some_and(|p| p.generation == generation) {
         return Ok(());
@@ -124,12 +125,13 @@ fn rewarm_if_stale(root: &PathBuf) -> Result<()> {
         return Ok(()); // a foreground warm already has it
     };
     eprintln!("simmer daemon: warming {}", root.display());
-    let profile = warm::warm(&project, &cache)?;
+    let profile = warm::warm_with(&project, &cache, false)?;
     eprintln!(
-        "simmer daemon: warmed {} ({} vars, {}ms)",
+        "simmer daemon: warmed {} ({} vars, {}ms, {})",
         root.display(),
         profile.vars.len(),
-        profile.warm_ms
+        profile.warm_ms,
+        profile.mode
     );
     Ok(())
 }
