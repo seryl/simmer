@@ -65,6 +65,40 @@ impl Cache {
         Ok(())
     }
 
+    /// The generation for the project's current state, hashing content
+    /// only when the stat fingerprint changed since the last time — the
+    /// hot-path reason a prompt costs microseconds with dozens of watched
+    /// files. Falls back to [`Project::generation`] on a miss and records
+    /// the answer.
+    pub fn generation_of(&self, project: &Project) -> Result<String> {
+        let sig = project.stat_signature();
+        if let Some(known) = self.generation_for_stat(&sig) {
+            return Ok(known);
+        }
+        let generation = project.generation()?;
+        self.store_stat(&sig, &generation)?;
+        Ok(generation)
+    }
+
+    fn generation_for_stat(&self, sig: &str) -> Option<String> {
+        let text = std::fs::read_to_string(self.dir.join("statsig")).ok()?;
+        let (known_sig, generation) = text.split_once('\n')?;
+        (known_sig == sig && !generation.is_empty()).then(|| generation.to_string())
+    }
+
+    fn store_stat(&self, sig: &str, generation: &str) -> Result<()> {
+        let tmp = self.dir.join("statsig.tmp");
+        std::fs::write(&tmp, format!("{sig}\n{generation}"))?;
+        std::fs::rename(&tmp, self.dir.join("statsig"))?;
+        Ok(())
+    }
+
+    /// Directory of out-links pinning the flake's inputs, next to the
+    /// shell's own GC root: after `nix store gc` a warm needs no network.
+    pub fn inputs_dir(&self) -> PathBuf {
+        self.dir.join("inputs")
+    }
+
     /// Watches discovered during the last warm (`watch_file` calls in
     /// .envrc), absolute paths. Missing file = no dynamic watches.
     pub fn dynamic_watches(&self) -> Vec<PathBuf> {

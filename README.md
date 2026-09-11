@@ -26,7 +26,9 @@ Two paths, nothing else:
   the daemon reuses it.
 - **Export** (every prompt): compare generation hashes, emit native shell
   code only when something changed. No bash, no nix, no subprocesses;
-  measured well under a millisecond.
+  measured well under a millisecond. The watched files are fingerprinted
+  by stat (mtime, size, inode); their content is hashed only after a
+  fingerprint changes, so dozens of watched files cost microseconds.
 
 The daemon has **no IPC**: the disk cache is the interface. It re-warms
 registered projects the moment a watched file changes, so the
@@ -56,7 +58,17 @@ closed — unknown fields are errors):
 (or copied, or template-substituted with `@VAR@` / `@VAR:-default@`) into
 the project at warm time and listed in a marked block of `.gitignore`;
 the GC root keeps their sources alive, so a linked config can no longer
-dangle after `nix store gc`. `providers` declared here run like manifest providers.
+dangle after `nix store gc`. `providers` declared here run like manifest providers. `motd` and the
+`commands` list become the **entry banner**: rendered once at warm time,
+printed to stderr (only when stderr is a terminal) the first time a
+session enters the project — never on a generation switch, never into a
+captured environment. `SIMMER_NO_MOTD=1` silences it; `a project menu command`
+prints the same listing on demand.
+
+A native warm also roots every **flake input** next to the shell's GC
+root (`inputs/` in the project's cache directory, refreshed when
+`flake.lock` changes), so a warm after `nix store gc` re-evaluates from
+the store instead of re-fetching sources.
 The buildenv framework (`a consuming project`) emits this
 from a pure-data shell declaration.
 
@@ -86,8 +98,11 @@ repo changes, reversible per project.
 flake = ".#dev"
 
 # Extra files whose content defines the env (shells imported from other
-# files are silently stale without this).
-watch = ["nix/shells/dev.nix"]
+# files are silently stale without this). A wildcard entry is expanded
+# at warm time and its directory tree is watched by the daemon, so a
+# file that appears later still triggers a re-warm; the prompt never
+# walks the tree.
+watch = ["nix/**/*.nix"]
 
 # Declarative equivalents of the common .envrc lines:
 dotenv = [".env.local"]
@@ -111,6 +126,12 @@ stdlib subset: `use flake` / `use nix`, `PATH_add`, `dotenv`,
 `env_vars_required`, and friends. `layout` is unsupported (loud warning).
 The repo needs no changes; teammates keep using direnv against the same
 file.
+
+The `direnv`-named shim (`packages.direnv-shim`) serves editor plugins
+and `direnv exec` callers. With a real direnv installed it delegates
+projects simmer does not manage to it; without one it is the only
+loader — `export` for such a project prints nothing and `exec` runs the
+command in the caller's environment.
 
 ## Use
 

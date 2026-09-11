@@ -50,6 +50,10 @@ pub struct EnvProfile {
     /// (bash + print-dev-env). Absent in profiles from older versions.
     #[serde(default)]
     pub mode: String,
+    /// Motd + command menu rendered from env.json at warm time; shown on
+    /// entry. Harness profiles have none (there is no data to render).
+    #[serde(default)]
+    pub banner: Option<String>,
 }
 
 impl EnvProfile {
@@ -88,7 +92,7 @@ impl EnvProfile {
             };
             vars.insert(name, entry);
         }
-        EnvProfile { generation, root, vars, warm_ms, mode: String::new() }
+        EnvProfile { generation, root, vars, warm_ms, mode: String::new(), banner: None }
     }
 }
 

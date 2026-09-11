@@ -9,7 +9,11 @@
 
 use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use simmer_core::{cache::Cache, project::Project, registry, warm};
+use simmer_core::{
+    cache::Cache,
+    project::{glob_base, glob_match, Project},
+    registry, warm,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -36,6 +40,10 @@ pub fn run() -> Result<()> {
     // are matched exactly against event paths.
     let mut watched_dirs: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
     let mut interesting: HashSet<PathBuf> = HashSet::new();
+    // Wildcard watches: (project root, pattern) — the pattern's base
+    // directory is watched recursively, so a file that did not exist at
+    // the last warm still triggers one.
+    let mut globs: Vec<(PathBuf, String)> = Vec::new();
     let mut known: HashSet<PathBuf> = HashSet::new();
     let mut pending: HashMap<PathBuf, Instant> = HashMap::new();
     let mut last_rescan = Instant::now() - REGISTRY_RESCAN;
@@ -73,6 +81,14 @@ pub fn run() -> Result<()> {
                             watched_dirs.entry(dir).or_default().insert(root.clone());
                             interesting.insert(path);
                         }
+                        for pattern in project.watch_globs() {
+                            let base = root.join(glob_base(pattern));
+                            if let Err(e) = watcher.watch(&base, RecursiveMode::Recursive) {
+                                eprintln!("simmer daemon: cannot watch {}: {e}", base.display());
+                                continue;
+                            }
+                            globs.push((root.clone(), pattern.to_string()));
+                        }
                         eprintln!("simmer daemon: tracking {}", root.display());
                     }
                     Err(e) => eprintln!("simmer daemon: skipping {}: {e:#}", root.display()),
@@ -87,6 +103,14 @@ pub fn run() -> Result<()> {
                         for root in watched_dirs.get(dir).into_iter().flatten() {
                             pending.insert(root.clone(), Instant::now() + DEBOUNCE);
                         }
+                    }
+                }
+                for (root, pattern) in &globs {
+                    let matched = path
+                        .strip_prefix(root)
+                        .is_ok_and(|rel| glob_match(pattern, &rel.to_string_lossy()));
+                    if matched {
+                        pending.insert(root.clone(), Instant::now() + DEBOUNCE);
                     }
                 }
             }
@@ -116,6 +140,9 @@ fn rewarm_if_stale(root: &Path) -> Result<()> {
         return Ok(()); // trust revoked (or .envrc edited) since tracking began
     }
     project.extend_watches(cache.dynamic_watches());
+    // Expanded here (a tree walk is fine off the prompt) so a file that
+    // appeared since the last warm counts as a change.
+    project.extend_watches(project.expand_globs());
     project.extend_boot_scoped(cache.boot_scoped());
     let generation = project.generation()?;
     if cache.load().is_some_and(|p| p.generation == generation) {

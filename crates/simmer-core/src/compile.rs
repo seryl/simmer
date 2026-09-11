@@ -154,6 +154,22 @@ pub fn unload_script(shell: Shell, state: &SessionState, base: &BTreeMap<String,
     render(shell, &unload_changes(state, base))
 }
 
+/// Code that shows `text` to a human: stderr only, and only when stderr
+/// is a terminal, so captured environments (CI, editor shims, `nix
+/// develop -c`) never see it. Emitted on entry, never on the fast path.
+pub fn banner_script(shell: Shell, text: &str) -> String {
+    match shell {
+        Shell::Fish => format!(
+            "if isatty stderr\n    printf '%s\\n' {} >&2\nend\n",
+            quote_fish(text)
+        ),
+        Shell::Bash | Shell::Zsh => format!(
+            "if [ -t 2 ]; then printf '%s\\n' {} >&2; fi\n",
+            crate::warm::quote_single(text)
+        ),
+    }
+}
+
 fn emit_set(out: &mut String, shell: Shell, name: &str, value: &str) {
     match shell {
         // PATH is a list in fish; splitting on ':' here keeps it one entry
@@ -209,7 +225,16 @@ mod tests {
             ]),
             warm_ms: 0,
             mode: String::new(),
+            banner: None,
         }
+    }
+
+    #[test]
+    fn banner_script_targets_a_terminal_on_stderr_only() {
+        let fish = banner_script(Shell::Fish, "dev\n[code]\n  it's");
+        assert_eq!(fish, "if isatty stderr\n    printf '%s\\n' 'dev\n[code]\n  it\\'s' >&2\nend\n");
+        let bash = banner_script(Shell::Bash, "hi");
+        assert_eq!(bash, "if [ -t 2 ]; then printf '%s\\n' 'hi' >&2; fi\n");
     }
 
     #[test]

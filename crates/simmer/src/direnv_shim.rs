@@ -8,7 +8,9 @@
 //! everything else is transparently delegated to the real direnv
 //! (`$SIMMER_DIRENV_FALLBACK`, else the first non-shim direnv on PATH) —
 //! so unmigrated projects keep working in editors during the
-//! transition, per-project.
+//! transition, per-project. With no real direnv installed the shim is
+//! the only loader: `export` for a project simmer does not manage is
+//! quiet, and `exec` runs the command in the caller's environment.
 
 use anyhow::{bail, Context, Result};
 use simmer_core::{
@@ -76,7 +78,8 @@ fn resolve(dir: &Path) -> Result<Outcome> {
     }
 
     project.extend_watches(cache.dynamic_watches());
-    let generation = project.generation()?;
+    project.extend_boot_scoped(cache.boot_scoped());
+    let generation = cache.generation_of(&project)?;
     let cached_generation = cache.cached_generation();
     if cached_generation.as_deref() != Some(generation.as_str()) {
         crate::spawn_background_warm(&project)?;
@@ -99,6 +102,7 @@ fn resolve(dir: &Path) -> Result<Outcome> {
 fn export(format: &str, original_args: &[String]) -> Result<()> {
     let dir = std::env::current_dir().context("resolving current directory")?;
     let changes = match resolve(&dir)? {
+        Outcome::Delegate if real_direnv().is_none() => return Ok(()),
         Outcome::Delegate => return delegate(original_args),
         Outcome::Changes(changes) => changes,
     };
@@ -124,6 +128,7 @@ fn exec_in_env(rest: &[String], original_args: &[String]) -> Result<()> {
     };
     let dir = PathBuf::from(dir);
     let changes = match resolve(&dir)? {
+        Outcome::Delegate if real_direnv().is_none() => Changes::new(),
         Outcome::Delegate => return delegate(original_args),
         Outcome::Changes(changes) => changes,
     };

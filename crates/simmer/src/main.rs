@@ -171,7 +171,7 @@ fn cmd_export(shell: &str, dir: Option<PathBuf>, no_warm: bool) -> Result<()> {
     }
     project.extend_watches(cache.dynamic_watches());
     project.extend_boot_scoped(cache.boot_scoped());
-    let generation = project.generation()?;
+    let generation = cache.generation_of(&project)?;
     let cached_generation = cache.cached_generation();
 
     let profile_stale = cached_generation.as_deref() != Some(generation.as_str());
@@ -194,6 +194,13 @@ fn cmd_export(shell: &str, dir: Option<PathBuf>, no_warm: bool) -> Result<()> {
     let Some(profile) = cache.load() else { return Ok(()) };
     let base = compile::effective_env(&current, state.as_ref());
     print!("{}", compile::apply_script(shell, &profile, &base, state.as_ref()));
+    // The banner greets a human entering the project — not a generation
+    // switch while they sit in it, and never a captured environment.
+    let entering = state.as_ref().is_none_or(|s| s.root != profile.root);
+    let quiet = std::env::var_os("SIMMER_NO_MOTD").is_some_and(|v| v == "1");
+    if let (true, false, Some(banner)) = (entering, quiet, &profile.banner) {
+        print!("{}", compile::banner_script(shell, banner));
+    }
     Ok(())
 }
 
@@ -350,12 +357,12 @@ fn cmd_doctor(dir: Option<PathBuf>) -> Result<()> {
     let generation = project.generation()?;
     let profile = cache.load();
 
-    // Hot-path cost, measured for real: hash watched files, load the
-    // profile, compile the apply script.
+    // Hot-path cost, measured for real: fingerprint watched files, load
+    // the profile, compile the apply script.
     let t = Instant::now();
     let mut compiled_bytes = 0;
     for _ in 0..10 {
-        let g = project.generation()?;
+        let g = cache.generation_of(&project)?;
         if let Some(p) = cache.load() {
             let base = compile::effective_env(&current, None);
             compiled_bytes = compile::apply_script(Shell::Fish, &p, &base, None).len();
@@ -370,6 +377,9 @@ fn cmd_doctor(dir: Option<PathBuf>) -> Result<()> {
             "project": project.root,
             "trusted": trusted,
             "watched": project.watched,
+            "watch_globs": project.watch_globs(),
+            "banner": profile.as_ref().is_some_and(|p| p.banner.is_some()),
+            "input_roots": std::fs::read_dir(cache.inputs_dir()).map(|d| d.count().saturating_sub(1)).unwrap_or(0),
             "providers": project.config.providers.iter().map(|p| &p.env).collect::<Vec<_>>(),
             "generation": generation,
             "fresh": profile.as_ref().map(|p| p.generation == generation).unwrap_or(false),

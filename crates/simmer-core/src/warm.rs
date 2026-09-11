@@ -22,9 +22,11 @@
 use crate::cache::Cache;
 use crate::configs;
 use crate::envspec::{current_system, EnvSpec, Var, ENV_SPEC_FILE};
+use crate::menu;
 use crate::profile::{EnvProfile, Value, SKIP_VARS};
-use crate::project::Project;
+use crate::project::{hex, Project};
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -65,17 +67,23 @@ pub fn warm_with(project: &Project, cache: &Cache, probe: bool) -> Result<EnvPro
         && (probe || cache.warm_mode().as_deref() != Some(MODE_HARNESS));
     let native = if try_native { build_native(project, cache, &caller)? } else { None };
 
-    let (vars, dynamic, boot_scoped, mode) = match native {
+    let (vars, mut dynamic, boot_scoped, mode, banner) = match native {
         Some(spec) => {
             let (vars, dynamic) = materialize(project, &spec, &caller)?;
-            (vars, dynamic, spec.boot_scoped(), MODE_NATIVE)
+            (vars, dynamic, spec.boot_scoped(), MODE_NATIVE, menu::banner(&spec))
         }
         None => {
             let (captured, dynamic) = run_harness(project, &caller, cache)?;
             let vars = captured_vars(captured, &caller);
-            (vars, dynamic, false, MODE_HARNESS)
+            (vars, dynamic, false, MODE_HARNESS, None)
         }
     };
+    // Wildcard watches are expanded here, once, into the dynamic set the
+    // prompt hashes; the daemon watches their directory trees for files
+    // that appear later.
+    dynamic.extend(project.expand_globs());
+    dynamic.sort();
+    dynamic.dedup();
     cache.store_dynamic_watches(&dynamic)?;
     cache.store_boot_scoped(boot_scoped)?;
     cache.store_warm_mode(mode)?;
@@ -94,6 +102,7 @@ pub fn warm_with(project: &Project, cache: &Cache, probe: bool) -> Result<EnvPro
         vars,
         warm_ms: started.elapsed().as_millis() as u64,
         mode: mode.to_string(),
+        banner,
     };
     cache.store(&profile)?;
     // Every warmed project joins the daemon's pre-warm work list.
@@ -160,7 +169,84 @@ fn build_native(
     if !spec_path.is_file() {
         return Ok(None);
     }
+    if let Err(e) = pin_inputs(project, cache, caller) {
+        eprintln!("simmer: could not pin flake inputs: {e:#}");
+    }
     EnvSpec::load(&spec_path).map(Some)
+}
+
+/// Root every flake input next to the shell's GC root, once per
+/// `flake.lock` content, so a warm after `nix store gc` re-evaluates from
+/// the store instead of re-fetching sources. The flake's own source tree
+/// is skipped: it is the working copy, and the shell closure is already
+/// pinned.
+fn pin_inputs(project: &Project, cache: &Cache, caller: &BTreeMap<String, String>) -> Result<()> {
+    let Ok(lock) = std::fs::read(project.root.join("flake.lock")) else { return Ok(()) };
+    let lock_hash = hex(&Sha256::digest(&lock));
+    let dir = cache.inputs_dir();
+    let marker = dir.join("lock-hash");
+    if std::fs::read_to_string(&marker).is_ok_and(|h| h == lock_hash) {
+        return Ok(());
+    }
+    let flake = native_installable(project)
+        .and_then(|i| i.split_once('#').map(|(base, _)| base.to_string()))
+        .unwrap_or_else(|| ".".to_string());
+    let output = Command::new("nix")
+        .args(["flake", "archive", "--json", "--no-write-lock-file"])
+        .arg(&flake)
+        .env_clear()
+        .envs(caller)
+        .current_dir(&project.root)
+        .stderr(Stdio::inherit())
+        .output()
+        .context("running nix flake archive")?;
+    if !output.status.success() {
+        bail!("nix flake archive failed");
+    }
+    let tree: serde_json::Value = serde_json::from_slice(&output.stdout).context("parsing archive json")?;
+    let paths = input_paths(&tree);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    if !paths.is_empty() {
+        let status = Command::new("nix")
+            .args(["build", "--no-write-lock-file", "--out-link"])
+            .arg(dir.join("in"))
+            .args(&paths)
+            .env_clear()
+            .envs(caller)
+            .current_dir(&project.root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("running nix build for input roots")?;
+        if !status.success() {
+            bail!("nix build failed to root {} inputs", paths.len());
+        }
+    }
+    std::fs::write(marker, lock_hash)?;
+    Ok(())
+}
+
+/// Store paths of every input in `nix flake archive --json` output,
+/// recursively, without the top-level flake's own path.
+fn input_paths(tree: &serde_json::Value) -> Vec<String> {
+    fn collect(node: &serde_json::Value, top: bool, out: &mut Vec<String>) {
+        if !top {
+            if let Some(path) = node.get("path").and_then(|p| p.as_str()) {
+                out.push(path.to_string());
+            }
+        }
+        if let Some(inputs) = node.get("inputs").and_then(|i| i.as_object()) {
+            for child in inputs.values() {
+                collect(child, false, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    collect(tree, true, &mut out);
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Turn the spec plus the manifest's declarative additions into profile
@@ -510,6 +596,17 @@ mod tests {
         assert_eq!(vars["CAP"], Value::Literal("11".into()));
         assert_eq!(dynamic, vec![PathBuf::from(".env")]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn input_paths_skip_the_flake_itself_and_recurse() {
+        let tree: serde_json::Value = serde_json::from_str(
+            r#"{"path":"/nix/store/self","inputs":{
+                "a":{"path":"/nix/store/a","inputs":{"nested":{"path":"/nix/store/n","inputs":{}}}},
+                "b":{"path":"/nix/store/b","inputs":{"dup":{"path":"/nix/store/n"}}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(input_paths(&tree), vec!["/nix/store/a", "/nix/store/b", "/nix/store/n"]);
     }
 
     #[test]
