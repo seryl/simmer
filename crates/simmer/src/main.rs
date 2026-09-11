@@ -363,19 +363,26 @@ fn cmd_doctor(dir: Option<PathBuf>) -> Result<()> {
     let generation = project.generation()?;
     let profile = cache.load();
 
-    // Hot-path cost, measured for real: fingerprint watched files, load
-    // the profile, compile the apply script.
+    // Hot-path cost, measured for real. `export_hot_us` is what every
+    // prompt pays when the environment is current: fingerprint the
+    // watched files and compare the generation sidecar. `export_apply_us`
+    // is the entry path on top of that: load the profile and compile the
+    // apply script.
+    let t = Instant::now();
+    for _ in 0..10 {
+        let g = cache.generation_of(&project)?;
+        let _ = cache.cached_generation().as_deref() == Some(g.as_str());
+    }
+    let export_hot_us = t.elapsed().as_micros() / 10;
     let t = Instant::now();
     let mut compiled_bytes = 0;
     for _ in 0..10 {
-        let g = cache.generation_of(&project)?;
         if let Some(p) = cache.load() {
             let base = compile::effective_env(&current, None);
             compiled_bytes = compile::apply_script(Shell::Fish, &p, &base, None).len();
-            let _ = g;
         }
     }
-    let export_us = t.elapsed().as_micros() / 10;
+    let export_apply_us = export_hot_us + t.elapsed().as_micros() / 10;
 
     println!(
         "{}",
@@ -392,7 +399,8 @@ fn cmd_doctor(dir: Option<PathBuf>) -> Result<()> {
             "mode": profile.as_ref().map(|p| p.mode.clone()),
             "native_installable": warm::native_installable(&project),
             "last_warm_ms": profile.as_ref().map(|p| p.warm_ms),
-            "export_cost_us": export_us,
+            "export_hot_us": export_hot_us,
+            "export_apply_us": export_apply_us,
             "apply_script_bytes": compiled_bytes,
             "registered_projects": registry::list().len(),
             "warnings": warnings,

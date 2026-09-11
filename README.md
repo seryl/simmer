@@ -151,7 +151,7 @@ eval "$(simmer export bash)"
 simmer daemon --print-systemd > ~/.config/systemd/user/simmer.service
 systemctl --user enable --now simmer
 
-# diagnose the load path:
+# diagnose the load path (export_hot_us: every prompt; export_apply_us: entry):
 simmer doctor
 ```
 
