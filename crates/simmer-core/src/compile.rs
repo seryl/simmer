@@ -214,6 +214,7 @@ mod tests {
 
     fn profile() -> EnvProfile {
         EnvProfile {
+            format: crate::profile::PROFILE_FORMAT,
             generation: "gen1".into(),
             root: "/proj".into(),
             vars: BTreeMap::from([

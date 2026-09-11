@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use simmer_core::{
     cache::Cache,
+    profile::PROFILE_FORMAT,
     project::{glob_base, glob_match, Project},
     registry, warm,
 };
@@ -90,6 +91,9 @@ pub fn run() -> Result<()> {
                             globs.push((root.clone(), pattern.to_string()));
                         }
                         eprintln!("simmer daemon: tracking {}", root.display());
+                        // Catch up on anything that changed while no
+                        // daemon was watching (or a simmer upgrade).
+                        pending.insert(root.clone(), Instant::now());
                     }
                     Err(e) => eprintln!("simmer daemon: skipping {}: {e:#}", root.display()),
                 }
@@ -145,7 +149,7 @@ fn rewarm_if_stale(root: &Path) -> Result<()> {
     project.extend_watches(project.expand_globs());
     project.extend_boot_scoped(cache.boot_scoped());
     let generation = project.generation()?;
-    if cache.load().is_some_and(|p| p.generation == generation) {
+    if cache.load().is_some_and(|p| p.generation == generation && p.format >= PROFILE_FORMAT) {
         return Ok(());
     }
     let Some(_lock) = cache.try_lock_warm()? else {

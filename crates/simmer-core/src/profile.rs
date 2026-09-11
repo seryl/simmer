@@ -36,9 +36,17 @@ pub enum Value {
     WithCaller { prefix: String, sep: String },
 }
 
+/// Bumped whenever a warm starts producing something a profile from an
+/// older simmer lacks (the banner, input roots); such profiles are
+/// re-warmed in the background instead of served until a file changes.
+pub const PROFILE_FORMAT: u32 = 2;
+
 /// The cached, fully-resolved environment for one project generation.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EnvProfile {
+    /// [`PROFILE_FORMAT`] of the simmer that wrote it; absent before 2.
+    #[serde(default)]
+    pub format: u32,
     /// Content-hash generation this profile was built from.
     pub generation: String,
     /// Project root it belongs to.
@@ -92,7 +100,7 @@ impl EnvProfile {
             };
             vars.insert(name, entry);
         }
-        EnvProfile { generation, root, vars, warm_ms, mode: String::new(), banner: None }
+        EnvProfile { format: PROFILE_FORMAT, generation, root, vars, warm_ms, mode: String::new(), banner: None }
     }
 }
 

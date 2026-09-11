@@ -11,6 +11,7 @@ use clap::{Parser, Subcommand};
 use simmer_core::{
     cache::Cache,
     compile::{self, Shell},
+    profile::PROFILE_FORMAT,
     project::Project,
     registry, warm,
 };
@@ -192,6 +193,11 @@ fn cmd_export(shell: &str, dir: Option<PathBuf>, no_warm: bool) -> Result<()> {
     // Stale-while-revalidate: an out-of-date environment beats a missing
     // one, and beats blocking the prompt on a multi-second nix eval.
     let Some(profile) = cache.load() else { return Ok(()) };
+    // A profile from an older simmer is served now and rebuilt behind
+    // the prompt, so an upgrade needs no manual warm.
+    if profile.format < PROFILE_FORMAT && !profile_stale && !no_warm {
+        spawn_background_warm(&project)?;
+    }
     let base = compile::effective_env(&current, state.as_ref());
     print!("{}", compile::apply_script(shell, &profile, &base, state.as_ref()));
     // The banner greets a human entering the project — not a generation

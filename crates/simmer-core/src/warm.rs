@@ -23,7 +23,7 @@ use crate::cache::Cache;
 use crate::configs;
 use crate::envspec::{current_system, EnvSpec, Var, ENV_SPEC_FILE};
 use crate::menu;
-use crate::profile::{EnvProfile, Value, SKIP_VARS};
+use crate::profile::{EnvProfile, Value, PROFILE_FORMAT, SKIP_VARS};
 use crate::project::{hex, Project};
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -97,6 +97,7 @@ pub fn warm_with(project: &Project, cache: &Cache, probe: bool) -> Result<EnvPro
     let generation = resolved.generation()?;
 
     let profile = EnvProfile {
+        format: PROFILE_FORMAT,
         generation,
         root: project.root.display().to_string(),
         vars,
