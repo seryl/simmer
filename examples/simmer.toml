@@ -1,0 +1,41 @@
+# .simmer.toml — the project manifest. Copy to your project root as
+# `.simmer.toml`. Every key is optional; unknown keys are errors.
+
+# The dev shell to load. Default: "." (the flake's default dev shell) when
+# flake.nix exists. A bare fragment is looked up under
+# devShells.<system>; a dotted one (".#packages.x86_64-linux.foo") is used
+# as written.
+flake = ".#default"
+
+# Files beyond flake.nix, flake.lock and this manifest whose content
+# defines the environment. Editing any of them triggers a rebuild at the
+# next prompt. Wildcards (`*`, `?`, `**`) are expanded at build time; the
+# daemon also watches their directories for new files.
+watch = ["nix/*.nix", "toolchain.toml"]
+
+# KEY=value files (an `export ` prefix and quotes are accepted; no
+# interpolation). Watched automatically.
+dotenv = [".env", ".env.local"]
+
+# Directories prepended to PATH, relative to the project root, in order.
+path = ["bin", "scripts"]
+
+# Literal environment variables.
+[env]
+DATABASE_URL = "postgres://localhost/app_dev"
+RUST_LOG = "info"
+
+# Providers: a command whose stdout becomes a variable. They run once per
+# build, in order, in the finished environment (so later providers can use
+# earlier ones). A provider that fails or prints nothing leaves its
+# variable unset and is reported as a warning.
+[[provider]]
+env = "GIT_BRANCH"
+command = "git rev-parse --abbrev-ref HEAD"
+
+[[provider]]
+env = "GPU_ARCH"
+command = "nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d ."
+# "generation" (default): re-run only when a watched file changes.
+# "boot": also re-run after a reboot — for hardware probes.
+invalidate = "boot"

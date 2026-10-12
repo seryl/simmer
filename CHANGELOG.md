@@ -1,0 +1,84 @@
+# Changelog
+
+All notable changes to simmer are listed here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
+follow [Semantic Versioning](https://semver.org/).
+
+## Unreleased
+
+### Changed
+
+- **simmer waits instead of backgrounding.** When the environment is stale,
+  `simmer export` (the prompt hook) now rebuilds in the foreground and then
+  applies the fresh environment, instead of serving the old one and
+  rebuilding in a detached process. `--background` (or
+  `SIMMER_BACKGROUND=1`) restores the old behaviour. The direnv shim waits
+  the same way.
+- A second `simmer warm` for the same project waits for the one already
+  running instead of returning immediately. The warm lock is now a kernel
+  `flock` (released automatically if a warm crashes).
+- A failing step's exit status is simmer's exit status (124 on timeout,
+  128+N when stopped by signal N). Failures are no longer silent: failing
+  providers and input pinning are reported as warnings with their output,
+  and `use flake` / `use nix` in an `.envrc` fail the build when nix fails
+  (they used to produce an environment without the dev shell).
+- A version that failed to build is not rebuilt at every prompt; the
+  previous environment stays loaded and simmer says so once per shell.
+- The pre-warm daemon is a separate `simmer-daemon` binary (`simmer daemon`
+  runs it), so the prompt-time binary no longer links CoreServices and
+  CoreFoundation on macOS.
+- The zsh hook also runs before each prompt (`precmd`), like fish and bash,
+  so edits are picked up without a `cd`.
+
+### Added
+
+- A progress display for everything simmer waits on: a live, in-place view
+  on terminals (header with counts, one line per running step with its
+  phase and output tail, `✓`/`✗` lines for finished steps), plain lines for
+  CI (`--plain`), JSON events (`--json`), `-q` and `-v`. Failed steps print
+  their log (`--log-lines`) and a summary table; full logs are saved in the
+  project's cache. `NO_COLOR` is respected.
+- `--timeout` / `SIMMER_TIMEOUT` to bound how long a build may take.
+- Ctrl-C and SIGTERM stop every process a build started, then report; an
+  interrupted rebuild is not restarted by the next prompt. The daemon stops
+  its children the same way when it is stopped.
+- `simmer status` and `simmer doctor` report the last failed build.
+- A one-time hint when entering a project that is not allowed yet
+  (`SIMMER_NO_HINTS=1` silences it; `simmer deny` stops it per project).
+- `examples/` with a small flake, an annotated manifest and `env.json`.
+
+### Fixed
+
+- A `.simmer.toml` that does not parse is reported (at every prompt, by
+  `status`, `warm`, `allow`) instead of making the project look absent,
+  which silently unloaded its environment.
+- A build that creates a watched file (nix writes `flake.lock` on a flake's
+  first evaluation) no longer leaves the environment stale at once, which
+  caused an immediate second rebuild.
+- A prompt-time rebuild no longer re-probes for a native `env.json` shell
+  (an extra `nix build`) when the last build already settled on the bash
+  harness; `simmer warm` still probes.
+- Multi-line nix errors keep their line breaks in logs, and a failed
+  harness build is summarised by nix's own `error:` line.
+
+- The daemon's project registry no longer drops `.envrc`-only and
+  manifest-only projects.
+- Watches on directories declared by an `.envrc` are detected relative to
+  the project root rather than simmer's working directory.
+
+### Performance
+
+- The prompt path (`simmer export`, environment current) went from 5.1 ms
+  to 3.1 ms on macOS, and entering a project from 5.2 ms to 2.9 ms, mostly
+  by no longer loading the file-watching frameworks and libiconv at
+  start-up. The cache directory is no longer created on every prompt;
+  template config files are rendered once per build instead of three
+  times; flake inputs are pinned in parallel with materializing the
+  environment; prompt-time rebuilds of harness projects skip the
+  speculative native `nix build`.
+
+## 0.1.0
+
+Initial version: cached Nix dev environments replayed into fish, bash and
+zsh; native `env.json` warm mode and the bash harness for `.envrc` and
+other flakes; trust; the pre-warm daemon; the direnv-compatible shim.

@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+echo "greeting: $GREETING, env: $APP_ENV, cpus: $CPU_COUNT"

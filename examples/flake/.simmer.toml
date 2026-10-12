@@ -1,0 +1,13 @@
+# Everything here is optional; without this file simmer loads the flake's
+# default dev shell.
+
+# Put the project's own scripts on PATH.
+path = ["bin"]
+
+[env]
+APP_ENV = "development"
+
+# A provider: stdout becomes $CPU_COUNT, computed once per build.
+[[provider]]
+env = "CPU_COUNT"
+command = "getconf _NPROCESSORS_ONLN"
