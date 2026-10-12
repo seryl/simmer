@@ -50,7 +50,9 @@ pub struct EnvSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Var {
-    Set { value: String },
+    Set {
+        value: String,
+    },
     /// `value` + `sep` + the caller's current value (PATH-style merge).
     Prefix {
         value: String,
@@ -119,10 +121,8 @@ pub struct Hooks {
 
 impl EnvSpec {
     pub fn load(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let spec: EnvSpec =
-            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let spec: EnvSpec = serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         if spec.schema != ENV_SPEC_SCHEMA {
             bail!(
                 "{}: schema {} is not supported (this simmer speaks {})",
@@ -135,9 +135,7 @@ impl EnvSpec {
     }
 
     pub fn boot_scoped(&self) -> bool {
-        self.providers
-            .iter()
-            .any(|p| p.invalidate == crate::config::Invalidate::Boot)
+        self.providers.iter().any(|p| p.invalidate == crate::config::Invalidate::Boot)
     }
 }
 
@@ -166,10 +164,7 @@ mod tests {
                 "configs":[{"output":".rustfmt.toml","source":"/nix/store/c"}]}"#,
         )
         .unwrap();
-        assert_eq!(
-            spec.vars["PATH"],
-            Var::Prefix { value: "/nix/store/p/bin".into(), sep: ":".into() }
-        );
+        assert_eq!(spec.vars["PATH"], Var::Prefix { value: "/nix/store/p/bin".into(), sep: ":".into() });
         assert_eq!(spec.configs[0].mode, Mode::Link);
         assert!(spec.hooks.enter.is_none());
         assert!(!spec.boot_scoped());
@@ -179,8 +174,17 @@ mod tests {
     fn unknown_fields_are_errors() {
         let bad = r#"{"schema":1,"name":"x","system":"s","profile":"p","bogus":1}"#;
         assert!(serde_json::from_str::<EnvSpec>(bad).is_err());
-        let bad_var = r#"{"schema":1,"name":"x","system":"s","profile":"p","vars":{"A":{"kind":"set","value":"1","extra":2}}}"#;
+        let bad_var =
+            r#"{"schema":1,"name":"x","system":"s","profile":"p","vars":{"A":{"kind":"set","value":"1","extra":2}}}"#;
         assert!(serde_json::from_str::<EnvSpec>(bad_var).is_err());
+    }
+
+    #[test]
+    fn the_documented_example_parses() {
+        let spec: EnvSpec = serde_json::from_str(include_str!("../../../examples/env.json")).unwrap();
+        assert_eq!(spec.schema, ENV_SPEC_SCHEMA);
+        assert_eq!(spec.configs.len(), 3);
+        assert!(crate::menu::banner(&spec).is_some_and(|b| b.contains("hello")));
     }
 
     #[test]

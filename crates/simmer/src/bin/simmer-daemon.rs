@@ -1,4 +1,8 @@
-//! The pre-warm daemon.
+//! `simmer-daemon` — the optional pre-warm daemon (`simmer daemon` runs it).
+//!
+//! A separate binary so that the file-watching machinery (and, on macOS,
+//! the CoreServices framework it links) is loaded only by the daemon,
+//! never by the `simmer export` that runs on every prompt.
 //!
 //! No IPC: the disk cache is the only interface — `simmer export` reads it
 //! in well under a millisecond, so all the daemon has to do is keep it
@@ -13,7 +17,7 @@ use simmer_core::{
     cache::Cache,
     profile::PROFILE_FORMAT,
     project::{glob_base, glob_match, Project},
-    registry, warm,
+    registry, supervise, warm,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -23,7 +27,27 @@ use std::time::{Duration, Instant};
 const DEBOUNCE: Duration = Duration::from_millis(500);
 const REGISTRY_RESCAN: Duration = Duration::from_secs(30);
 
-pub fn run() -> Result<()> {
+fn main() {
+    // Rust ignores SIGPIPE; restore the default so a closed pipe ends us
+    // quietly.
+    // SAFETY: setting a signal disposition before any threads start.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+    if std::env::args().nth(1).is_some_and(|a| a == "--help" || a == "-h") {
+        println!("simmer-daemon: watch every allowed project simmer has warmed and re-warm it\nwhen a watched file changes. Usually started as `simmer daemon`.");
+        return;
+    }
+    if let Err(e) = run() {
+        eprintln!("simmer daemon: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
+    // SIGTERM/SIGINT stop a warm in progress (its whole process group)
+    // before the daemon exits; nothing it started outlives it.
+    supervise::signals::install().context("installing signal handlers")?;
     let (tx, rx) = mpsc::channel::<PathBuf>();
     let mut watcher = RecommendedWatcher::new(
         move |event: notify::Result<notify::Event>| {
@@ -100,6 +124,10 @@ pub fn run() -> Result<()> {
             }
         }
 
+        if let Some(signal) = supervise::signals::pending() {
+            eprintln!("simmer daemon: stopping ({})", supervise::signal_name(signal));
+            std::process::exit(128 + signal);
+        }
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(path) => {
                 if interesting.contains(&path) {
@@ -110,9 +138,7 @@ pub fn run() -> Result<()> {
                     }
                 }
                 for (root, pattern) in &globs {
-                    let matched = path
-                        .strip_prefix(root)
-                        .is_ok_and(|rel| glob_match(pattern, &rel.to_string_lossy()));
+                    let matched = path.strip_prefix(root).is_ok_and(|rel| glob_match(pattern, &rel.to_string_lossy()));
                     if matched {
                         pending.insert(root.clone(), Instant::now() + DEBOUNCE);
                     }
@@ -122,14 +148,14 @@ pub fn run() -> Result<()> {
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        let due: Vec<PathBuf> = pending
-            .iter()
-            .filter(|(_, deadline)| Instant::now() >= **deadline)
-            .map(|(root, _)| root.clone())
-            .collect();
+        let due: Vec<PathBuf> =
+            pending.iter().filter(|(_, deadline)| Instant::now() >= **deadline).map(|(root, _)| root.clone()).collect();
         for root in due {
             pending.remove(&root);
             if let Err(e) = rewarm_if_stale(&root) {
+                if supervise::is_interrupt(&e) {
+                    break;
+                }
                 eprintln!("simmer daemon: warm failed for {}: {e:#}", root.display());
             }
         }
@@ -165,20 +191,4 @@ fn rewarm_if_stale(root: &Path) -> Result<()> {
         profile.mode
     );
     Ok(())
-}
-
-/// systemd user unit for the daemon; `simmer daemon --print-systemd`.
-pub fn systemd_unit() -> String {
-    let exe = std::env::current_exe()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "simmer".to_string());
-    format!(
-        "[Unit]\n\
-         Description=simmer devshell pre-warm daemon\n\n\
-         [Service]\n\
-         ExecStart={exe} daemon\n\
-         Restart=on-failure\n\n\
-         [Install]\n\
-         WantedBy=default.target\n"
-    )
 }

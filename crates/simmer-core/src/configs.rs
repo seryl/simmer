@@ -22,10 +22,14 @@ pub enum Status {
     Missing,
     /// A symlink whose target no longer exists (the store path was
     /// garbage-collected).
-    Dangling { target: String },
+    Dangling {
+        target: String,
+    },
     /// Present but not what the declaration says (other target, or
     /// different content for copies).
-    Drifted { actual: String },
+    Drifted {
+        actual: String,
+    },
     /// A regular file sits where a link is declared — someone's own
     /// file; never overwritten.
     Unmanaged,
@@ -46,10 +50,7 @@ impl Report {
 
 /// Audit every declared file. Never modifies anything.
 pub fn check(root: &Path, configs: &[ConfigFile]) -> Vec<Report> {
-    configs
-        .iter()
-        .map(|cfg| Report { output: cfg.output.clone(), status: status_of(root, cfg, None) })
-        .collect()
+    configs.iter().map(|cfg| Report { output: cfg.output.clone(), status: status_of(root, cfg, None) }).collect()
 }
 
 fn status_of(root: &Path, cfg: &ConfigFile, vars: Option<&BTreeMap<String, String>>) -> Status {
@@ -97,33 +98,37 @@ fn status_of(root: &Path, cfg: &ConfigFile, vars: Option<&BTreeMap<String, Strin
 /// (`@PRJ_ROOT@`, provider outputs, any finished-environment variable).
 /// Returns the post-apply state; an `Unmanaged` entry is reported, not
 /// clobbered.
-pub fn apply(
-    root: &Path,
-    configs: &[ConfigFile],
-    vars: &BTreeMap<String, String>,
-) -> Result<Vec<Report>> {
+pub fn apply(root: &Path, configs: &[ConfigFile], vars: &BTreeMap<String, String>) -> Result<Vec<Report>> {
     let mut reports = Vec::with_capacity(configs.len());
     for cfg in configs {
         let path = root.join(&cfg.output);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
-        let before = status_of(root, cfg, Some(vars));
-        match (cfg.mode, &before) {
-            (_, Status::Ok) | (Mode::Link, Status::Unmanaged) => {}
-            (Mode::Link, _) => {
-                remove_if_present(&path)?;
-                std::os::unix::fs::symlink(&cfg.source, &path)
-                    .with_context(|| format!("linking {}", path.display()))?;
+        let status = match cfg.mode {
+            Mode::Link => match status_of(root, cfg, None) {
+                status @ (Status::Ok | Status::Unmanaged) => status,
+                _ => {
+                    remove_if_present(&path)?;
+                    std::os::unix::fs::symlink(&cfg.source, &path)
+                        .with_context(|| format!("linking {}", path.display()))?;
+                    status_of(root, cfg, None)
+                }
+            },
+            // Render once; rewrite only when the file differs. What was
+            // just written is what was declared, so no re-read follows.
+            Mode::Copy | Mode::Template => {
+                let expected = rendered(cfg, Some(vars))?;
+                let is_file = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file());
+                let current = if is_file { std::fs::read(&path).ok() } else { None };
+                if current.as_deref() != Some(expected.as_slice()) {
+                    remove_if_present(&path)?;
+                    std::fs::write(&path, &expected).with_context(|| format!("writing {}", path.display()))?;
+                }
+                Status::Ok
             }
-            (Mode::Copy | Mode::Template, _) => {
-                remove_if_present(&path)?;
-                std::fs::write(&path, rendered(cfg, Some(vars))?)
-                    .with_context(|| format!("writing {}", path.display()))?;
-            }
-        }
-        reports.push(Report { output: cfg.output.clone(), status: status_of(root, cfg, Some(vars)) });
+        };
+        reports.push(Report { output: cfg.output.clone(), status });
     }
     let managed: Vec<String> = configs.iter().map(|c| c.output.clone()).collect();
     update_gitignore(root, &managed)?;
@@ -168,8 +173,7 @@ pub fn substitute(text: &str, vars: &BTreeMap<String, String>) -> String {
                     Some((n, f)) => (n, Some(f)),
                     None => (token, None),
                 };
-                let is_ident =
-                    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+                let is_ident = !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
                 let value = vars.get(name).filter(|v| !v.is_empty()).map(String::as_str);
                 match (is_ident, value, fallback) {
                     (true, Some(value), _) => {
@@ -342,19 +346,14 @@ mod tests {
             cfg(&dir, ".buckconfig.local", Mode::Template),
             cfg(&dir, "mine.txt", Mode::Link),
         ];
-        let vars = BTreeMap::from([
-            ("PRJ_ROOT".to_string(), "/proj".to_string()),
-            ("CAP".to_string(), "90".to_string()),
-        ]);
+        let vars =
+            BTreeMap::from([("PRJ_ROOT".to_string(), "/proj".to_string()), ("CAP".to_string(), "90".to_string())]);
         let reports = apply(&root, &configs, &vars).unwrap();
         assert_eq!(reports[0].status, Status::Ok);
         assert_eq!(std::fs::read_link(root.join("cog.toml")).unwrap(), Path::new(&configs[0].source));
         assert_eq!(reports[1].status, Status::Ok);
         assert!(!std::fs::symlink_metadata(root.join(".rustfmt.toml")).unwrap().file_type().is_symlink());
-        assert_eq!(
-            std::fs::read_to_string(root.join(".buckconfig.local")).unwrap(),
-            "root = /proj cap=90 keep@me"
-        );
+        assert_eq!(std::fs::read_to_string(root.join(".buckconfig.local")).unwrap(), "root = /proj cap=90 keep@me");
         assert_eq!(reports[3].status, Status::Unmanaged);
         assert_eq!(std::fs::read_to_string(root.join("mine.txt")).unwrap(), "mine");
         // Idempotent.
@@ -389,11 +388,8 @@ mod tests {
     fn stale_exclude_block_is_removed_by_apply() {
         let dir = scratch("exclude-cleanup");
         let root = dir.join("root");
-        std::fs::write(
-            root.join(".git/info/exclude"),
-            format!("/mine\n{EXCLUDE_BEGIN}\n/old\n{EXCLUDE_END}\n"),
-        )
-        .unwrap();
+        std::fs::write(root.join(".git/info/exclude"), format!("/mine\n{EXCLUDE_BEGIN}\n/old\n{EXCLUDE_END}\n"))
+            .unwrap();
         apply(&root, &[], &BTreeMap::new()).unwrap();
         assert_eq!(std::fs::read_to_string(root.join(".git/info/exclude")).unwrap(), "/mine\n");
         std::fs::remove_dir_all(&dir).unwrap();

@@ -7,20 +7,44 @@ use std::collections::BTreeMap;
 /// here is either shell machinery, session identity, or a build-sandbox
 /// value that only makes sense inside `nix build`.
 pub const SKIP_VARS: &[&str] = &[
-    "_", "BASH", "BASHOPTS", "EUID", "HOME", "HOSTNAME", "HOSTTYPE", "IFS", "LINENO",
-    "LOGNAME", "MACHTYPE", "NIX_BUILD_TOP", "NIX_ENFORCE_PURITY", "NIX_LOG_FD", "OLDPWD",
-    "OPTERR", "OSTYPE", "PPID", "PS4", "PWD", "SHELL", "SHELLOPTS", "SHLVL", "TEMP",
-    "TEMPDIR", "TERM", "TMP", "TMPDIR", "TZ", "UID", "USER",
+    "_",
+    "BASH",
+    "BASHOPTS",
+    "EUID",
+    "HOME",
+    "HOSTNAME",
+    "HOSTTYPE",
+    "IFS",
+    "LINENO",
+    "LOGNAME",
+    "MACHTYPE",
+    "NIX_BUILD_TOP",
+    "NIX_ENFORCE_PURITY",
+    "NIX_LOG_FD",
+    "OLDPWD",
+    "OPTERR",
+    "OSTYPE",
+    "PPID",
+    "PS4",
+    "PWD",
+    "SHELL",
+    "SHELLOPTS",
+    "SHLVL",
+    "TEMP",
+    "TEMPDIR",
+    "TERM",
+    "TMP",
+    "TMPDIR",
+    "TZ",
+    "UID",
+    "USER",
 ];
 
 /// Sentinel values Nix shells emit for variables they expect the hook or
 /// the consumer to overwrite; a variable still carrying one after the hook
 /// ran must not leak into a real shell.
-pub const SENTINELS: &[(&str, &str)] = &[
-    ("PATH", "/path-not-set"),
-    ("HOME", "/homeless-shelter"),
-    ("SHELL", "/noshell"),
-];
+pub const SENTINELS: &[(&str, &str)] =
+    &[("PATH", "/path-not-set"), ("HOME", "/homeless-shelter"), ("SHELL", "/noshell")];
 
 /// Variables whose devshell value is merged with the caller's value at
 /// export time (nix paths first), rather than replacing it. Mirrors
@@ -33,7 +57,10 @@ pub enum Value {
     Literal(String),
     /// `prefix` + the caller's current value of the variable (or nothing if
     /// unset) — how PATH keeps the user's entries behind the nix ones.
-    WithCaller { prefix: String, sep: String },
+    WithCaller {
+        prefix: String,
+        sep: String,
+    },
 }
 
 /// Bumped whenever a warm starts producing something a profile from an
@@ -172,22 +199,14 @@ mod tests {
             &caller,
             0,
         );
-        assert_eq!(
-            profile.vars["PATH"],
-            Value::WithCaller { prefix: "/nix/store/x/bin".into(), sep: ":".into() }
-        );
+        assert_eq!(profile.vars["PATH"], Value::WithCaller { prefix: "/nix/store/x/bin".into(), sep: ":".into() });
     }
 
     #[test]
     fn path_without_caller_tail_stays_literal() {
         let caller = cap(&[("PATH", "/usr/bin")]);
-        let profile = EnvProfile::from_captured(
-            "g".into(),
-            "/r".into(),
-            cap(&[("PATH", "/nix/store/x/bin")]),
-            &caller,
-            0,
-        );
+        let profile =
+            EnvProfile::from_captured("g".into(), "/r".into(), cap(&[("PATH", "/nix/store/x/bin")]), &caller, 0);
         assert_eq!(profile.vars["PATH"], Value::Literal("/nix/store/x/bin".into()));
     }
 }

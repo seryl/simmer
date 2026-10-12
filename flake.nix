@@ -27,15 +27,23 @@
       (crane.mkLib nixpkgs.legacyPackages.${system})
       .overrideToolchain fenix.packages.${system}.stable.minimalToolchain;
 
+    # Checks also need clippy and rustfmt.
+    checkCraneFor = system:
+      (crane.mkLib nixpkgs.legacyPackages.${system})
+      .overrideToolchain fenix.packages.${system}.stable.defaultToolchain;
+
     # crane's default filter keeps only Cargo-relevant files; the warm
-    # harness shim is embedded via include_str!("shim.bash") and must
-    # survive too.
+    # harness shim is embedded via include_str!("shim.bash"), the
+    # integration tests drive a stand-in `nix` from tests/support/, and unit
+    # tests check that the documented examples/ parse.
     srcFor = craneLib:
       nixpkgs.lib.cleanSourceWith {
         src = ./.;
         filter = path: type:
           craneLib.filterCargoSources path type
-          || builtins.match ".*\\.bash$" path != null;
+          || builtins.match ".*\\.bash$" path != null
+          || builtins.match ".*/tests/support(/.*)?$" path != null
+          || builtins.match ".*/examples(/.*)?$" path != null;
       };
   in {
     packages = forSystems (system: let
@@ -48,7 +56,10 @@
         strictDeps = true;
         meta = {
           description = "Instant Nix devshells: cached environments replayed natively into fish/bash/zsh";
+          homepage = "https://github.com/seryl/simmer";
+          license = nixpkgs.lib.licenses.mit;
           mainProgram = "simmer";
+          platforms = nixpkgs.lib.platforms.unix;
         };
       };
       # A `direnv`-named symlink to the simmer binary (busybox pattern —
@@ -67,10 +78,12 @@
     });
 
     checks = forSystems (system: let
-      craneLib = craneFor system;
+      craneLib = checkCraneFor system;
       src = srcFor craneLib;
       cargoArtifacts = craneLib.buildDepsOnly {inherit src;};
     in {
+      package = self.packages.${system}.simmer;
+      fmt = craneLib.cargoFmt {inherit src;};
       clippy = craneLib.cargoClippy {
         inherit src cargoArtifacts;
         cargoClippyExtraArgs = "--all-targets -- --deny warnings";

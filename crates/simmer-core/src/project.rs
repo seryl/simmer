@@ -10,8 +10,7 @@ use std::path::{Path, PathBuf};
 /// (`nix/**/*.nix`) is a pattern: expanded at warm time into the dynamic
 /// watch set, and watched as a directory tree by the daemon, so the
 /// prompt never walks the tree.
-pub const WATCHED_FILES: &[&str] =
-    &["flake.nix", "flake.lock", "devshell.toml", ".simmer.toml", "simmer.toml"];
+pub const WATCHED_FILES: &[&str] = &["flake.nix", "flake.lock", "devshell.toml", ".simmer.toml", "simmer.toml"];
 
 pub fn is_glob(pattern: &str) -> bool {
     pattern.contains(['*', '?'])
@@ -52,10 +51,7 @@ fn match_component(pat: &str, text: &str) -> bool {
 
 /// The literal directory a pattern starts in (`nix/**/*.nix` → `nix`).
 pub fn glob_base(pattern: &str) -> PathBuf {
-    pattern
-        .split('/')
-        .take_while(|c| !is_glob(c))
-        .collect()
+    pattern.split('/').take_while(|c| !is_glob(c)).collect()
 }
 
 fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -73,6 +69,14 @@ fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Files whose presence makes a directory a project root.
+pub const ROOT_MARKERS: &[&str] = &["flake.nix", ".envrc", ".simmer.toml", "simmer.toml"];
+
+/// Whether `dir` holds any of the [`ROOT_MARKERS`].
+pub fn is_project_root(dir: &Path) -> bool {
+    ROOT_MARKERS.iter().any(|m| dir.join(m).is_file())
+}
+
 #[derive(Debug, Clone)]
 pub struct Project {
     pub root: PathBuf,
@@ -87,19 +91,25 @@ pub struct Project {
 impl Project {
     /// Walk upward from `dir` to the first directory holding a flake.nix
     /// or a .envrc — either one roots a project.
+    ///
+    /// A root whose manifest does not parse is reported as `None` here;
+    /// use [`Self::locate`] to see the error instead.
     pub fn discover(dir: &Path) -> Option<Self> {
+        Self::locate(dir).ok().flatten()
+    }
+
+    /// Like [`Self::discover`], but a project root whose `.simmer.toml`
+    /// cannot be read or parsed is an error (so the user hears about the
+    /// typo) rather than "no project here".
+    pub fn locate(dir: &Path) -> Result<Option<Self>> {
         let mut cur = Some(dir);
         while let Some(d) = cur {
-            if d.join("flake.nix").is_file()
-                || d.join(".envrc").is_file()
-                || d.join(".simmer.toml").is_file()
-                || d.join("simmer.toml").is_file()
-            {
-                return Self::at(d).ok();
+            if is_project_root(d) {
+                return Self::at(d).map(Some);
             }
             cur = d.parent();
         }
-        None
+        Ok(None)
     }
 
     pub fn at(root: &Path) -> Result<Self> {
@@ -277,10 +287,7 @@ mod tests {
         // The prompt-side watched set carries no expansion.
         assert!(!p.watched.iter().any(|w| w.starts_with("nix")));
         assert_eq!(p.watch_globs(), vec!["nix/**/*.nix"]);
-        assert_eq!(
-            p.expand_globs(),
-            vec![PathBuf::from("nix/a.nix"), PathBuf::from("nix/deep/b.nix")]
-        );
+        assert_eq!(p.expand_globs(), vec![PathBuf::from("nix/a.nix"), PathBuf::from("nix/deep/b.nix")]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -293,6 +300,17 @@ mod tests {
         assert_eq!(s1, p.stat_signature());
         std::fs::write(dir.join("flake.nix"), "bb").unwrap();
         assert_ne!(s1, Project::at(&dir).unwrap().stat_signature());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_broken_manifest_is_an_error_not_an_absent_project() {
+        let dir = scratch("broken");
+        std::fs::write(dir.join("flake.nix"), "x").unwrap();
+        std::fs::write(dir.join(".simmer.toml"), "[[provider]]\n").unwrap();
+        assert!(Project::discover(&dir).is_none());
+        let err = Project::locate(&dir).unwrap_err();
+        assert!(format!("{err:#}").contains(".simmer.toml"), "{err:#}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

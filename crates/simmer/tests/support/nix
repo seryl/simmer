@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# A stand-in for `nix` used by simmer's integration tests and benchmarks.
+# It understands just enough of the CLI simmer drives:
+#
+#   nix [--log-format F] build --no-link --print-out-paths --profile P INSTALLABLE
+#   nix [--log-format F] build ... --out-link P PATHS...
+#   nix [--log-format F] flake archive --json ...
+#   nix [--log-format F] print-dev-env --profile P ...
+#
+# simmer scrubs the environment it runs nix in, so the knobs are read from
+# a `fake-nix.env` file next to this script (sourced when present).
+#
+# Behaviour knobs:
+#   FAKE_NIX_OUT     directory printed as the build output (holds env.json)
+#   FAKE_NIX_EXIT    exit with this status after printing FAKE_NIX_STDERR
+#   FAKE_NIX_STDERR  lines written to stderr before doing anything
+#   FAKE_NIX_BLOCK   if set, start a long-lived grandchild, record its pid
+#                    in this file, and wait on it (interrupt tests)
+#   FAKE_NIX_LOG     append the argv of every call to this file
+#   FAKE_NIX_WRITE_LOCK  create ./flake.lock if absent (as real nix does on
+#                    a flake's first evaluation)
+#   FAKE_NIX_DEMO    emit a short internal-json build log with pauses
+#                    (for looking at the live progress display)
+set -u
+knobs="${0%/*}/fake-nix.env"
+[ -f "$knobs" ] && . "$knobs"
+[ -n "${FAKE_NIX_LOG:-}" ] && printf '%s\n' "$*" >>"$FAKE_NIX_LOG"
+while [ "${1:-}" = "--log-format" ]; do shift 2; done
+[ -n "${FAKE_NIX_STDERR:-}" ] && printf '%s\n' "$FAKE_NIX_STDERR" >&2
+[ -n "${FAKE_NIX_WRITE_LOCK:-}" ] && [ ! -e flake.lock ] && printf '{"version":7}\n' >flake.lock
+if [ -n "${FAKE_NIX_DEMO:-}" ] && [ "${1:-}" = build ]; then
+  for pkg in openssl-3.3.2 rustc-1.82.0 cargo-1.82.0 hello-2.12; do
+    printf '@nix {"action":"start","id":1,"text":"copying path '"'"'/nix/store/%032d-%s'"'"' from '"'"'https://cache.nixos.org'"'"'","type":100}\n' 0 "$pkg" >&2
+    sleep 0.4
+  done
+  printf '@nix {"action":"start","id":2,"text":"building '"'"'/nix/store/%032d-dev-shell.drv'"'"'","type":105}\n' 0 >&2
+  for line in "unpacking sources" "patching sources" "configuring" "building" "installing"; do
+    printf '@nix {"action":"result","id":2,"type":101,"fields":["%s"]}\n' "$line" >&2
+    sleep 0.3
+  done
+fi
+if [ -n "${FAKE_NIX_BLOCK:-}" ]; then
+  sleep 1000 &
+  printf '%s\n' "$!" >"$FAKE_NIX_BLOCK.tmp"
+  mv "$FAKE_NIX_BLOCK.tmp" "$FAKE_NIX_BLOCK"
+  wait
+fi
+[ -n "${FAKE_NIX_EXIT:-}" ] && exit "$FAKE_NIX_EXIT"
+case "${1:-}" in
+  build)
+    shift
+    out_link=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --profile|--out-link) out_link="$2"; shift 2 ;;
+        --*) shift ;;
+        *) break ;;
+      esac
+    done
+    if [ -n "${FAKE_NIX_OUT:-}" ]; then
+      [ -n "$out_link" ] && ln -sfn "$FAKE_NIX_OUT" "$out_link"
+      printf '%s\n' "$FAKE_NIX_OUT"
+    else
+      echo "error: flake has no devShell" >&2
+      exit 1
+    fi
+    ;;
+  flake)
+    printf '{"path":"/nix/store/self","inputs":{}}\n'
+    ;;
+  print-dev-env)
+    printf "export FAKE_DEV_ENV='1'\n"
+    ;;
+  *)
+    echo "fake nix: unsupported: $*" >&2
+    exit 2
+    ;;
+esac

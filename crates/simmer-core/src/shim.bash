@@ -99,20 +99,34 @@ use() {
 use_flake() {
   # print-dev-env exports build-sandbox identity (HOME=/homeless-shelter,
   # SHELL=/noshell); restore the real ones so later .envrc lines, dotenv
-  # files, and providers see a sane world.
-  local __home="$HOME" __shell="$SHELL" __term="${TERM:-}"
-  eval "$(nix print-dev-env --profile "$SIMMER_GCROOT" "$@")"
+  # files, and providers see a sane world. A failing nix ends the warm
+  # with nix's exit status: an environment without its dev shell is not
+  # an environment.
+  local __home="$HOME" __shell="$SHELL" __term="${TERM:-}" __env __rc
+  # shellcheck disable=SC2086 # word-split flags on purpose
+  __env="$(nix ${SIMMER_NIX_FLAGS:-} print-dev-env --profile "$SIMMER_GCROOT" "$@")" || {
+    __rc=$?
+    log_error "nix print-dev-env $* failed (exit $__rc)"
+    exit "$__rc"
+  }
+  eval "$__env"
   export HOME="$__home" SHELL="$__shell"
   [ -n "$__term" ] && export TERM="$__term"
   return 0
 }
 
 use_nix() {
-  local f="${1:-shell.nix}"
+  local f="${1:-shell.nix}" __env __rc
   [ -f "$f" ] || f="default.nix"
   watch_file "$f"
   local __home="$HOME" __shell="$SHELL"
-  eval "$(nix print-dev-env --profile "$SIMMER_GCROOT" -f "$f")"
+  # shellcheck disable=SC2086
+  __env="$(nix ${SIMMER_NIX_FLAGS:-} print-dev-env --profile "$SIMMER_GCROOT" -f "$f")" || {
+    __rc=$?
+    log_error "nix print-dev-env -f $f failed (exit $__rc)"
+    exit "$__rc"
+  }
+  eval "$__env"
   export HOME="$__home" SHELL="$__shell"
   return 0
 }

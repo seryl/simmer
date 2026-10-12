@@ -15,7 +15,9 @@ pub fn list() -> Vec<PathBuf> {
     let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
     serde_json::from_str::<Vec<PathBuf>>(&text)
         .map(|mut roots| {
-            roots.retain(|r| r.join("flake.nix").is_file());
+            // Drop projects that no longer exist; any project marker counts
+            // (a .envrc- or manifest-only project is a project too).
+            roots.retain(|r| crate::project::is_project_root(r));
             roots
         })
         .unwrap_or_default()

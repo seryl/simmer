@@ -1,0 +1,4 @@
+# Drop dylibs nothing references (on macOS the Nix toolchain adds libiconv
+# to every link line): one less library for dyld to load at each prompt.
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-Wl,-dead_strip_dylibs"]

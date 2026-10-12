@@ -5,7 +5,13 @@ members = ["crates/simmer-core", "crates/simmer"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.82"
 license = "MIT"
+authors = ["Josh Toft <joshtoft@gmail.com>"]
+repository = "https://github.com/seryl/simmer"
+homepage = "https://github.com/seryl/simmer"
+keywords = ["nix", "devshell", "direnv", "environment", "shell"]
+categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 anyhow = "1"

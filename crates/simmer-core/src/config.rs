@@ -83,8 +83,7 @@ impl Config {
             let path = root.join(name);
             match std::fs::read_to_string(&path) {
                 Ok(text) => {
-                    return toml::from_str(&text)
-                        .with_context(|| format!("parsing {}", path.display()));
+                    return toml::from_str(&text).with_context(|| format!("parsing {}", path.display()));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
@@ -101,9 +100,7 @@ impl Config {
 /// Kernel boot id — empty string where unavailable (non-Linux), which
 /// simply disables boot-scoped invalidation there.
 pub fn boot_id() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id").map(|s| s.trim().to_string()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -133,6 +130,15 @@ mod tests {
         assert_eq!(config.path, vec!["bin"]);
         assert_eq!(config.env["FOO"], "bar");
         assert!(config.boot_scoped());
+    }
+
+    #[test]
+    fn the_documented_examples_parse() {
+        let full: Config = toml::from_str(include_str!("../../../examples/simmer.toml")).unwrap();
+        assert_eq!(full.providers.len(), 2);
+        assert!(full.boot_scoped());
+        let small: Config = toml::from_str(include_str!("../../../examples/flake/.simmer.toml")).unwrap();
+        assert_eq!(small.path, vec!["bin"]);
     }
 
     #[test]

@@ -48,10 +48,7 @@ pub type Changes = BTreeMap<String, Option<String>>;
 
 /// The caller's environment with any active simmer session backed out —
 /// the baseline both unload and fresh applies must be computed against.
-pub fn effective_env(
-    current: &BTreeMap<String, String>,
-    state: Option<&SessionState>,
-) -> BTreeMap<String, String> {
+pub fn effective_env(current: &BTreeMap<String, String>, state: Option<&SessionState>) -> BTreeMap<String, String> {
     let mut env = current.clone();
     if let Some(state) = state {
         for name in &state.set {
@@ -73,21 +70,14 @@ pub fn read_state(current: &BTreeMap<String, String>) -> Option<SessionState> {
 /// Compute the delta that applies `profile` on top of `base` (an
 /// [`effective_env`] result). If `prior` is an active session its
 /// teardown is folded in first, so generation switches are atomic.
-pub fn apply_changes(
-    profile: &EnvProfile,
-    base: &BTreeMap<String, String>,
-    prior: Option<&SessionState>,
-) -> Changes {
+pub fn apply_changes(profile: &EnvProfile, base: &BTreeMap<String, String>, prior: Option<&SessionState>) -> Changes {
     let mut changes = Changes::new();
     if let Some(prior) = prior {
         unload_into(&mut changes, prior, base);
     }
 
-    let mut state = SessionState {
-        generation: profile.generation.clone(),
-        root: profile.root.clone(),
-        ..Default::default()
-    };
+    let mut state =
+        SessionState { generation: profile.generation.clone(), root: profile.root.clone(), ..Default::default() };
     for (name, value) in &profile.vars {
         if let Some(old) = base.get(name) {
             state.saved.insert(name.clone(), old.clone());
@@ -103,10 +93,7 @@ pub fn apply_changes(
         changes.insert(name.clone(), Some(resolved));
     }
     changes.insert(GEN_VAR.into(), Some(profile.generation.clone()));
-    changes.insert(
-        STATE_VAR.into(),
-        Some(serde_json::to_string(&state).unwrap_or_default()),
-    );
+    changes.insert(STATE_VAR.into(), Some(serde_json::to_string(&state).unwrap_or_default()));
     changes
 }
 
@@ -159,14 +146,10 @@ pub fn unload_script(shell: Shell, state: &SessionState, base: &BTreeMap<String,
 /// develop -c`) never see it. Emitted on entry, never on the fast path.
 pub fn banner_script(shell: Shell, text: &str) -> String {
     match shell {
-        Shell::Fish => format!(
-            "if isatty stderr\n    printf '%s\\n' {} >&2\nend\n",
-            quote_fish(text)
-        ),
-        Shell::Bash | Shell::Zsh => format!(
-            "if [ -t 2 ]; then printf '%s\\n' {} >&2; fi\n",
-            crate::warm::quote_single(text)
-        ),
+        Shell::Fish => format!("if isatty stderr\n    printf '%s\\n' {} >&2\nend\n", quote_fish(text)),
+        Shell::Bash | Shell::Zsh => {
+            format!("if [ -t 2 ]; then printf '%s\\n' {} >&2; fi\n", crate::warm::quote_single(text))
+        }
     }
 }
 
@@ -175,8 +158,7 @@ fn emit_set(out: &mut String, shell: Shell, name: &str, value: &str) {
         // PATH is a list in fish; splitting on ':' here keeps it one entry
         // per element instead of a single colon-joined blob.
         Shell::Fish if name == "PATH" => {
-            let parts: Vec<String> =
-                value.split(':').filter(|p| !p.is_empty()).map(quote_fish).collect();
+            let parts: Vec<String> = value.split(':').filter(|p| !p.is_empty()).map(quote_fish).collect();
             let _ = writeln!(out, "set -gx PATH {}", parts.join(" "));
         }
         Shell::Fish => {
@@ -219,10 +201,7 @@ mod tests {
             root: "/proj".into(),
             vars: BTreeMap::from([
                 ("FOO".to_string(), Value::Literal("has 'quotes'\nand lines".into())),
-                (
-                    "PATH".to_string(),
-                    Value::WithCaller { prefix: "/nix/bin".into(), sep: ":".into() },
-                ),
+                ("PATH".to_string(), Value::WithCaller { prefix: "/nix/bin".into(), sep: ":".into() }),
             ]),
             warm_ms: 0,
             mode: String::new(),
@@ -262,8 +241,7 @@ mod tests {
         assert_eq!(changes["FOO"], Some("has 'quotes'\nand lines".to_string()));
         assert!(changes[STATE_VAR].is_some());
         // A state round trip carries the saved baseline.
-        let state: SessionState =
-            serde_json::from_str(changes[STATE_VAR].as_ref().unwrap()).unwrap();
+        let state: SessionState = serde_json::from_str(changes[STATE_VAR].as_ref().unwrap()).unwrap();
         assert_eq!(state.saved["FOO"], "old");
     }
 
@@ -271,8 +249,7 @@ mod tests {
     fn unload_restores_saved_and_erases_new() {
         let base = env(&[("PATH", "/usr/bin"), ("FOO", "old")]);
         let changes = apply_changes(&profile(), &base, None);
-        let state: SessionState =
-            serde_json::from_str(changes[STATE_VAR].as_ref().unwrap()).unwrap();
+        let state: SessionState = serde_json::from_str(changes[STATE_VAR].as_ref().unwrap()).unwrap();
         let unload = unload_changes(&state, &base);
         assert_eq!(unload["FOO"], Some("old".to_string()));
         assert_eq!(unload["PATH"], Some("/usr/bin".to_string()));
