@@ -11,6 +11,27 @@ use std::time::{Duration, Instant};
 
 const SIMMER: &str = env!("CARGO_BIN_EXE_simmer");
 
+/// Install the stand-in `nix` at `dest`, its interpreter pinned to the
+/// `bash` found on this process's PATH. The script's own
+/// `#!/usr/bin/env bash` needs `/usr/bin/env`, which a Nix build sandbox
+/// does not have.
+fn install_fake_nix(dest: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let support = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/nix");
+    let script = std::fs::read_to_string(&support).unwrap();
+    let body = script.split_once('\n').map_or("", |(_shebang, body)| body);
+    std::fs::write(dest, format!("#!{}\n{body}", find_on_path("bash").display())).unwrap();
+    std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn find_on_path(name: &str) -> PathBuf {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("`{name}` not found on PATH; the fake nix needs it"))
+}
+
 struct World {
     root: PathBuf,
 }
@@ -24,8 +45,7 @@ impl World {
         for dir in ["home", "cache", "bin", "proj", "out"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
-        let support = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/nix");
-        std::fs::copy(support, root.join("bin/nix")).unwrap();
+        install_fake_nix(&root.join("bin/nix"));
         std::fs::write(root.join("proj/flake.nix"), "{ }\n").unwrap();
         World { root }
     }
