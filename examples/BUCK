@@ -1,0 +1,8 @@
+# Example configs that simmer-core's unit tests parse with include_str!.
+[
+    export_file(
+        name = f,
+        visibility = ["//crates/..."],
+    )
+    for f in ["simmer.toml", "env.json", "flake/.simmer.toml"]
+]

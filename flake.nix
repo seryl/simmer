@@ -105,6 +105,11 @@
         packages = [
           toolchain
           fenix.packages.${system}.rust-analyzer
+          # buck2 builds the same crates from the BUCK files; python3 runs the
+          # prelude's rustc wrapper, reindeer regenerates third-party/BUCK.
+          pkgs.buck2
+          pkgs.python3
+          pkgs.reindeer
         ];
       };
     });

@@ -1,0 +1,38 @@
+# Standalone buck2 root. Cargo remains the published build; buck2 builds the
+# same crates from the BUCK files next to each Cargo.toml.
+#
+# When this repo is mounted as a cell inside another buck2 project, that
+# project's [cells] and [external_cells] take precedence over these, so the
+# `prelude`, `toolchains` and `third-party` names resolve to the host's cells.
+
+[cells]
+root = .
+prelude = prelude
+toolchains = toolchains
+third-party = third-party
+
+[cell_aliases]
+config = prelude
+ovr_config = prelude
+fbcode = root
+fbsource = root
+fbcode_macros = root
+buck = root
+
+[external_cells]
+prelude = bundled
+
+[parser]
+target_platform_detector_spec = \
+  target:root//...->toolchains//:default \
+  target:third-party//...->toolchains//:default \
+  target:toolchains//...->toolchains//:default
+
+[build]
+execution_platforms = toolchains//:default
+
+[project]
+ignore = .git, target, result, buck-out
+
+# Optional site-local configuration, never committed.
+<?file:.buckconfig.local>

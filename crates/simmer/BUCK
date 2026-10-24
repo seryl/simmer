@@ -1,0 +1,62 @@
+load("//:cargo_env.bzl", "cargo_env")
+
+DESCRIPTION = "Instant Nix devshells: cached environments replayed natively into fish/bash/zsh"
+
+DEPS = [
+    "//crates/simmer-core:simmer-core",
+    "third-party//:anyhow",
+    "third-party//:clap",
+    "third-party//:libc",
+    "third-party//:notify",
+    "third-party//:serde_json",
+]
+
+SIMMER_SRCS = glob(["src/*.rs"])
+
+rust_binary(
+    name = "simmer",
+    srcs = SIMMER_SRCS,
+    crate_root = "src/main.rs",
+    edition = "2021",
+    env = cargo_env("simmer", DESCRIPTION),
+    deps = DEPS,
+    visibility = ["PUBLIC"],
+)
+
+rust_binary(
+    name = "simmer-daemon",
+    srcs = ["src/bin/simmer-daemon.rs"],
+    crate_root = "src/bin/simmer-daemon.rs",
+    edition = "2021",
+    env = cargo_env("simmer", DESCRIPTION),
+    deps = DEPS,
+    visibility = ["PUBLIC"],
+)
+
+rust_test(
+    name = "unittest",
+    srcs = SIMMER_SRCS,
+    crate_root = "src/main.rs",
+    edition = "2021",
+    env = cargo_env("simmer", DESCRIPTION),
+    deps = DEPS,
+)
+
+# What the CLI test reads from CARGO_MANIFEST_DIR: the stand-in `nix`.
+filegroup(
+    name = "test-support",
+    srcs = glob(["tests/support/**"]),
+)
+
+rust_test(
+    name = "cli",
+    srcs = ["tests/cli.rs"],
+    crate_root = "tests/cli.rs",
+    edition = "2021",
+    env = cargo_env("simmer", DESCRIPTION) | {
+        "CARGO_BIN_EXE_simmer": "$(location :simmer)",
+        "CARGO_MANIFEST_DIR": "$(location :test-support)",
+    },
+    # Cargo links every package dependency into integration tests.
+    deps = DEPS,
+)

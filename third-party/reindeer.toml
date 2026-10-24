@@ -1,0 +1,14 @@
+# reindeer: Cargo.lock -> BUCK, crates fetched with http_archive by sha256.
+precise_srcs = true
+vendor = false
+cargo_env = true
+
+[buck]
+file_name = "BUCK"
+buckfile_imports = """
+load("@prelude//rust:cargo_buildscript.bzl", "buildscript_run")
+load("@prelude//rust:cargo_package.bzl", "cargo")
+"""
+rust_library = "cargo.rust_library"
+rust_binary = "cargo.rust_binary"
+buildscript_genrule = "buildscript_run"
