@@ -1,0 +1,41 @@
+load("//:cargo_env.bzl", "cargo_env")
+
+DESCRIPTION = "Devshell environment engine: capture a Nix dev environment once, replay it into any shell in milliseconds"
+
+DEPS = [
+    "third-party//:anyhow",
+    "third-party//:libc",
+    "third-party//:serde",
+    "third-party//:serde_json",
+    "third-party//:sha2",
+    "third-party//:toml",
+]
+
+SRCS = glob(["src/**/*.rs", "src/**/*.bash"])
+
+rust_library(
+    name = "simmer-core",
+    crate = "simmer_core",
+    srcs = SRCS,
+    crate_root = "src/lib.rs",
+    edition = "2021",
+    env = cargo_env("simmer-core", DESCRIPTION),
+    deps = DEPS,
+    visibility = ["PUBLIC"],
+)
+
+# The unit tests include_str! files from the repo's examples/ directory, three
+# levels above src/, so the test crate is laid out as the repo is.
+rust_test(
+    name = "unittest",
+    crate = "simmer_core",
+    mapped_srcs = {src: "crates/simmer-core/" + src for src in SRCS} | {
+        "//examples:simmer.toml": "examples/simmer.toml",
+        "//examples:env.json": "examples/env.json",
+        "//examples:flake/.simmer.toml": "examples/flake/.simmer.toml",
+    },
+    crate_root = "crates/simmer-core/src/lib.rs",
+    edition = "2021",
+    env = cargo_env("simmer-core", DESCRIPTION),
+    deps = DEPS,
+)

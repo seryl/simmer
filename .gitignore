@@ -1,3 +1,5 @@
 /target
 /result
 /result-*
+/buck-out
+/.buckconfig.local
