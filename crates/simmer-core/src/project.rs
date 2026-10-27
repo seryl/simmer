@@ -77,6 +77,32 @@ pub fn is_project_root(dir: &Path) -> bool {
     ROOT_MARKERS.iter().any(|m| dir.join(m).is_file())
 }
 
+/// Overrides a headless caller (a CI builder) passes for one invocation.
+/// They outrank the manifest, and they key the generation, so a profile
+/// built under one set is never served under another.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Invocation {
+    /// The flake to load instead of the manifest's `flake`.
+    pub flake: Option<String>,
+    /// Arguments appended to every nix command simmer runs for the project
+    /// (`--override-input a b`, `--option build-users-group ''`).
+    pub nix_args: Vec<String>,
+}
+
+impl Invocation {
+    fn hash_into(&self, hasher: &mut Sha256) {
+        if *self == Invocation::default() {
+            return;
+        }
+        hasher.update(b"\0simmer:invocation\0");
+        hasher.update(self.flake.as_deref().unwrap_or("").as_bytes());
+        for arg in &self.nix_args {
+            hasher.update([0]);
+            hasher.update(arg.as_bytes());
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Project {
     pub root: PathBuf,
@@ -91,6 +117,8 @@ pub struct Project {
     /// direnv-driven callers that still read it (a CI builder's
     /// `direnv exec`), and simmer never sources it.
     pub has_manifest: bool,
+    /// Per-invocation overrides; empty unless a caller passed some.
+    pub invocation: Invocation,
 }
 
 impl Project {
@@ -133,7 +161,30 @@ impl Project {
         watched.sort();
         watched.dedup();
         let boot_scoped = config.boot_scoped();
-        Ok(Project { root: root.to_path_buf(), config, watched, boot_scoped, has_manifest })
+        Ok(Project {
+            root: root.to_path_buf(),
+            config,
+            watched,
+            boot_scoped,
+            has_manifest,
+            invocation: Invocation::default(),
+        })
+    }
+
+    /// This project as loaded under `invocation`'s overrides.
+    pub fn with_invocation(mut self, invocation: Invocation) -> Self {
+        self.invocation = invocation;
+        self
+    }
+
+    /// The flake to load: the invocation's, else the manifest's, else `.`
+    /// when the root holds a flake.nix.
+    pub fn flake_ref(&self) -> Option<String> {
+        self.invocation
+            .flake
+            .clone()
+            .or_else(|| self.config.flake.clone())
+            .or_else(|| self.root.join("flake.nix").is_file().then(|| ".".to_string()))
     }
 
     /// The manifest's wildcard `watch` entries.
@@ -228,6 +279,7 @@ impl Project {
             hasher.update([0]);
             hasher.update(boot_id().as_bytes());
         }
+        self.invocation.hash_into(&mut hasher);
         hex(&hasher.finalize()[..16])
     }
 
@@ -251,6 +303,7 @@ impl Project {
             hasher.update([0]);
             hasher.update(boot_id().as_bytes());
         }
+        self.invocation.hash_into(&mut hasher);
         let digest = hasher.finalize();
         Ok(hex(&digest[..16]))
     }
@@ -268,6 +321,32 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("simmer-test-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn the_invocation_keys_the_generation_and_outranks_the_manifest() {
+        let dir = scratch("invocation");
+        std::fs::write(dir.join("flake.nix"), "{}").unwrap();
+        std::fs::write(dir.join(".simmer.toml"), "flake = \".#dev\"\n").unwrap();
+        let plain = Project::at(&dir).unwrap();
+        assert_eq!(plain.flake_ref().as_deref(), Some(".#dev"));
+        let ci = plain.clone().with_invocation(Invocation {
+            flake: Some("path:.#ci".into()),
+            nix_args: vec!["--option".into(), "build-users-group".into(), String::new()],
+        });
+        assert_eq!(ci.flake_ref().as_deref(), Some("path:.#ci"));
+        // Both hashes move: the stat memo must never hand one invocation's
+        // generation to another.
+        assert_ne!(plain.generation().unwrap(), ci.generation().unwrap());
+        assert_ne!(plain.stat_signature(), ci.stat_signature());
+        // An empty argument is an argument.
+        let mut shorter = ci.clone();
+        shorter.invocation.nix_args.pop();
+        assert_ne!(ci.generation().unwrap(), shorter.generation().unwrap());
+        // No overrides hashes exactly as before.
+        let none = plain.clone().with_invocation(Invocation::default());
+        assert_eq!(plain.generation().unwrap(), none.generation().unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

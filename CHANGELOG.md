@@ -6,6 +6,17 @@ follow [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- **Headless callers.** `simmer export json` prints the whole environment
+  as `{"NAME": "value" | null}` for a program to apply, building first
+  when stale; an untrusted project or a failed build is an error. Global
+  `--flake <REF>` outranks the manifest's `flake`, and repeatable
+  `--nix-arg <ARG>` appends an argument to every nix command the build
+  runs; both key the cache. `--no-pin-inputs` skips rooting flake inputs
+  for a cache that dies with its caller. Together they replace a CI
+  builder's `direnv export json` over a `.envrc`.
+
 ### Changed
 
 - **A `.simmer.toml` outranks a `.envrc`.** A project with both loads

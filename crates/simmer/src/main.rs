@@ -15,7 +15,7 @@ use simmer_core::{
     compile::{self, Changes, Shell},
     profile::{EnvProfile, PROFILE_FORMAT},
     progress::{self, Progress},
-    project::Project,
+    project::{Invocation, Project},
     registry, supervise, term, warm,
 };
 use std::collections::BTreeMap;
@@ -88,6 +88,18 @@ struct Global {
     /// log is always saved in the project's cache)
     #[arg(long, global = true, value_name = "N", default_value_t = 40)]
     log_lines: usize,
+    /// Load this flake instead of the manifest's `flake`, e.g. `path:.#ci`
+    /// (for headless callers; keys the cache like a watched file)
+    #[arg(long, global = true, value_name = "REF")]
+    flake: Option<String>,
+    /// Append one argument to every nix command the build runs; repeat it,
+    /// e.g. `--nix-arg=--override-input --nix-arg=a --nix-arg=git+http://…`
+    #[arg(long = "nix-arg", global = true, value_name = "ARG", allow_hyphen_values = true)]
+    nix_args: Vec<String>,
+    /// Do not GC-root the flake's inputs: for a cache that dies with its
+    /// caller (a CI pod), where rooting only fetches every input again
+    #[arg(long, global = true)]
+    no_pin_inputs: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -95,6 +107,17 @@ enum ShellArg {
     Fish,
     Bash,
     Zsh,
+}
+
+/// What `simmer export` prints: shell code, or JSON for programs.
+#[derive(Clone, Copy, ValueEnum)]
+enum ExportFormat {
+    Fish,
+    Bash,
+    Zsh,
+    /// `{"NAME": "value" | null}` against the caller's environment (null
+    /// unsets): the whole environment, built first if it is stale
+    Json,
 }
 
 impl From<ShellArg> for Shell {
@@ -114,7 +137,7 @@ enum Cmd {
     /// is up to date; waits for a rebuild when the environment is stale.
     Export {
         #[arg(value_enum)]
-        shell: ShellArg,
+        shell: ExportFormat,
         /// Directory to resolve (defaults to the current directory)
         #[arg(long)]
         dir: Option<PathBuf>,
@@ -211,7 +234,12 @@ fn main() {
     let result = match cli.command {
         Cmd::Export { shell, dir, no_warm, background } => {
             let background = background || env_flag("SIMMER_BACKGROUND");
-            cmd_export(shell.into(), dir, no_warm, background, &g)
+            match shell {
+                ExportFormat::Json => cmd_export_json(dir, no_warm, &g),
+                ExportFormat::Fish => cmd_export(Shell::Fish, dir, no_warm, background, &g),
+                ExportFormat::Bash => cmd_export(Shell::Bash, dir, no_warm, background, &g),
+                ExportFormat::Zsh => cmd_export(Shell::Zsh, dir, no_warm, background, &g),
+            }
         }
         Cmd::Warm { dir, force } => cmd_warm(dir, force, &g),
         Cmd::Hook { shell } => cmd_hook(shell.into()),
@@ -247,7 +275,28 @@ impl Global {
     /// Defaults with only the environment applied (the direnv shim has no
     /// simmer flags of its own).
     fn from_env() -> Global {
-        Global { progress: None, plain: false, json: false, quiet: false, verbose: false, timeout: None, log_lines: 40 }
+        Global {
+            progress: None,
+            plain: false,
+            json: false,
+            quiet: false,
+            verbose: false,
+            timeout: None,
+            log_lines: 40,
+            flake: None,
+            nix_args: Vec::new(),
+            no_pin_inputs: false,
+        }
+    }
+
+    /// The per-invocation overrides these flags carry.
+    fn invocation(&self) -> Invocation {
+        Invocation { flake: self.flake.clone(), nix_args: self.nix_args.clone() }
+    }
+
+    /// The project enclosing `dir`, under this invocation's overrides.
+    fn locate(&self, dir: &Path) -> Result<Option<Project>> {
+        Ok(Project::locate(dir)?.map(|p| p.with_invocation(self.invocation())))
     }
 
     fn validate(&self) -> Result<()> {
@@ -374,7 +423,12 @@ fn foreground_warm(
         // warm` (or the first build): a prompt-time rebuild reuses the mode
         // the last build found instead of paying for a speculative build.
         let probe = explicit || cache.warm_mode().is_none();
-        let opts = warm::WarmOptions { deadline, probe, ..warm::WarmOptions::new(progress.clone()) };
+        let opts = warm::WarmOptions {
+            deadline,
+            probe,
+            pin_inputs: !g.no_pin_inputs,
+            ..warm::WarmOptions::new(progress.clone())
+        };
         warm::warm_opts(project, cache, &opts)
     })();
     if let Ok(profile) = &result {
@@ -420,13 +474,43 @@ fn first_line(e: &anyhow::Error) -> String {
     format!("{e:#}").lines().next().unwrap_or_default().to_string()
 }
 
+/// `simmer export json`: the environment for a program to apply (a CI
+/// builder's `Command::envs`). Unlike the shell formats it has no session:
+/// it always prints the whole environment, and an untrusted project or a
+/// failed build is an error rather than "keep what the shell has".
+fn cmd_export_json(dir: Option<PathBuf>, no_warm: bool, g: &Global) -> Result<()> {
+    let dir = resolve_dir(dir)?;
+    let mut project = g.locate(&dir)?.ok_or_else(|| no_project(&dir))?;
+    let cache = Cache::for_project(&project)?;
+    if !cache.trusted(&project) {
+        bail!("{} is not trusted; run `simmer allow --dir {}` first", pretty(&project.root), project.root.display());
+    }
+    project.extend_watches(cache.dynamic_watches());
+    project.extend_boot_scoped(cache.boot_scoped());
+    let generation = cache.generation_of(&project)?;
+    let profile = match cache.load().filter(|p| p.generation == generation && p.format >= PROFILE_FORMAT) {
+        Some(profile) => profile,
+        None if no_warm => bail!("the environment for {} is not built (--no-warm)", pretty(&project.root)),
+        None => foreground_warm(&project, &cache, g, false, false, false).inspect_err(|e| {
+            let message = if supervise::is_interrupt(e) { INTERRUPTED.to_string() } else { first_line(e) };
+            let _ = cache.record_failure(&generation, &message);
+        })?,
+    };
+    let current: BTreeMap<String, String> = std::env::vars().collect();
+    let state = compile::read_state(&current);
+    let base = compile::effective_env(&current, state.as_ref());
+    let changes = compile::apply_changes(&profile, &base, state.as_ref());
+    println!("{}", serde_json::to_string(&changes)?);
+    Ok(())
+}
+
 fn cmd_export(shell: Shell, dir: Option<PathBuf>, no_warm: bool, background: bool, g: &Global) -> Result<()> {
     let dir = resolve_dir(dir)?;
     let in_session = std::env::var_os(compile::STATE_VAR).is_some();
 
     // A project whose manifest does not parse is an error, reported at
     // every prompt until fixed; the shell keeps whatever it has loaded.
-    let Some(mut project) = Project::locate(&dir)? else {
+    let Some(mut project) = g.locate(&dir)? else {
         // Left the project: tear the session down against what the shell
         // held before we touched it.
         if in_session {
@@ -579,7 +663,7 @@ fn spawn_background_warm(project: &Project) -> Result<()> {
 
 fn cmd_warm(dir: Option<PathBuf>, force: bool, g: &Global) -> Result<()> {
     let dir = resolve_dir(dir)?;
-    let project = Project::locate(&dir)?.ok_or_else(|| no_project(&dir))?;
+    let project = g.locate(&dir)?.ok_or_else(|| no_project(&dir))?;
     let cache = Cache::for_project(&project)?;
     // Running `simmer warm` in a project is an explicit human action
     // there — it grants trust, like `direnv allow`.

@@ -100,6 +100,7 @@ small flake with a dev shell, a manifest, and an annotated `env.json`.
 | `simmer allow` / `simmer deny` | Trust or distrust the current project. |
 | `simmer warm` | Build the environment now and wait for it (also allows the project). |
 | `simmer export <shell>` | What the hook runs: print shell code that loads the environment. Waits for a rebuild when stale. |
+| `simmer export json` | The whole environment as `{"NAME": "value" \| null}`, for programs (see [Headless callers](#headless-callers)). |
 | `simmer status` | The current directory's state, as JSON. |
 | `simmer doctor` | Timings, cache state, and configuration hazards, as JSON. |
 | `simmer daemon` | Re-warm allowed projects as soon as a watched file changes (optional). |
@@ -280,6 +281,27 @@ projects without a manifest it is bound to the file's content.
 
 `simmer allow` is also the migration switch from direnv: until you allow a
 project, simmer leaves it alone and direnv (if hooked) keeps owning it.
+
+## Headless callers
+
+A program that runs commands inside a project's environment (a CI builder)
+asks for it as JSON and applies it to its own child processes:
+
+```sh
+simmer allow --dir "$ws"
+simmer --flake 'path:.#ci' --no-pin-inputs \
+  --nix-arg=--option --nix-arg=build-users-group --nix-arg= \
+  --nix-arg=--override-input --nix-arg=dep --nix-arg="$mirror" \
+  export json --dir "$ws"
+```
+
+`--flake` outranks the manifest's `flake`; every `--nix-arg` is appended
+to each nix command the build runs, one argument per flag (empty ones
+included). Both key the cache, so a profile built under one set is never
+served under another. `--no-pin-inputs` skips GC-rooting the flake's
+inputs, which only pays off for a cache that outlives the caller.
+`export json` builds first when the environment is stale, and fails —
+printing nothing — when the project is untrusted or the build fails.
 
 ## The daemon (optional)
 

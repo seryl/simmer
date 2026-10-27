@@ -311,6 +311,49 @@ fn a_manifest_outranks_the_envrc_and_loads_natively() {
 }
 
 #[test]
+fn export_json_builds_under_the_invocation_and_refuses_untrusted() {
+    let w = World::new("headless");
+    w.native_shell(r#""NATIVE":{"kind":"set","value":"yes"}"#);
+    let log = w.root.join("nix.log");
+    w.knobs(&[format!("FAKE_NIX_OUT={}", w.root.join("out").display()), format!("FAKE_NIX_LOG={}", log.display())]);
+    // A lock file makes input rooting due, so skipping it is observable.
+    std::fs::write(w.proj().join("flake.lock"), "{\"version\":7}\n").unwrap();
+    let headless = [
+        "--flake=path:.#ci",
+        "--nix-arg=--option",
+        "--nix-arg=build-users-group",
+        "--nix-arg=",
+        "--no-pin-inputs",
+        "export",
+        "json",
+    ];
+    // A builder must allow first; an untrusted project is an error, not "{}".
+    let out = w.run(&headless);
+    assert!(!out.status.success() && text(&out.stdout).is_empty(), "{}", text(&out.stdout));
+    assert!(text(&out.stderr).contains("simmer allow --dir"), "{}", text(&out.stderr));
+
+    assert!(w.run(&["allow"]).status.success());
+    let out = w.run(&headless);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let env: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(env["NATIVE"], "yes", "{env}");
+    // The invocation's flake and nix arguments reach the build.
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let build = calls.lines().find(|l| l.contains(" build --no-link")).expect(&calls);
+    assert!(build.contains("path:.#devShells.") && build.ends_with(".ci --option build-users-group "), "{build}");
+    assert!(!calls.contains("flake archive"), "--no-pin-inputs must not root inputs: {calls}");
+
+    // Served from cache under the same invocation; a different one rebuilds.
+    std::fs::remove_file(&log).unwrap();
+    assert!(w.run(&headless).status.success());
+    assert!(!log.exists(), "the same invocation must not rebuild");
+    assert!(w.run(&["export", "json"]).status.success());
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.contains(" build --no-link"), "a new invocation must rebuild");
+    assert!(calls.contains("flake archive"), "inputs are rooted by default: {calls}");
+}
+
+#[test]
 fn errors_explain_what_to_do() {
     let w = World::new("errors");
     std::fs::remove_file(w.proj().join("flake.nix")).unwrap();

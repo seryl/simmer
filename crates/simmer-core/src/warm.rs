@@ -71,11 +71,15 @@ pub struct WarmOptions {
     /// Stop every child and fail at this instant.
     pub deadline: Option<Instant>,
     pub cancel: Option<Cancel>,
+    /// GC-root the flake's inputs so a re-warm after `nix store gc` needs
+    /// no network. Pointless for a cache that dies with its caller (a CI
+    /// pod), where it costs a second fetch of every input.
+    pub pin_inputs: bool,
 }
 
 impl WarmOptions {
     pub fn new(progress: Progress) -> Self {
-        WarmOptions { probe: true, progress, deadline: None, cancel: None }
+        WarmOptions { probe: true, progress, deadline: None, cancel: None, pin_inputs: true }
     }
 
     fn run_opts(&self) -> RunOpts {
@@ -128,7 +132,10 @@ pub fn warm_opts(project: &Project, cache: &Cache, opts: &WarmOptions) -> Result
             // Rooting flake inputs is independent of materializing the
             // environment: run both at once, wait for both.
             let (materialized, pinned) = std::thread::scope(|scope| {
-                let pin = scope.spawn(|| pin_inputs(project, cache, &caller, opts));
+                let pin = scope.spawn(|| match opts.pin_inputs {
+                    true => pin_inputs(project, cache, &caller, opts),
+                    false => Ok(()),
+                });
                 let materialized = materialize(project, &spec, &caller, opts);
                 (materialized, pin.join())
             });
@@ -166,7 +173,9 @@ pub fn warm_opts(project: &Project, cache: &Cache, opts: &WarmOptions) -> Result
     // The static watch set is re-read too: the build itself may have
     // created a watched file (nix writes flake.lock on first evaluation),
     // and a generation computed without it would be stale at once.
-    let mut resolved = Project::at(&project.root).unwrap_or_else(|_| project.clone());
+    let mut resolved = Project::at(&project.root)
+        .map(|p| p.with_invocation(project.invocation.clone()))
+        .unwrap_or_else(|_| project.clone());
     resolved.extend_watches(dynamic);
     resolved.extend_boot_scoped(boot_scoped);
     let generation = resolved.generation()?;
@@ -227,8 +236,7 @@ fn nix(caller: &BTreeMap<String, String>, cwd: &Path) -> Command {
 /// The installable to build for a native warm: `.simmer.toml`'s `flake`
 /// (default `.`), with a bare fragment resolved under `devShells.<system>`.
 pub fn native_installable(project: &Project) -> Option<String> {
-    let flake =
-        project.config.flake.clone().or_else(|| project.root.join("flake.nix").is_file().then(|| ".".to_string()))?;
+    let flake = project.flake_ref()?;
     let (base, fragment) = match flake.split_once('#') {
         Some((b, f)) => (b.to_string(), f.to_string()),
         None => (flake.clone(), String::new()),
@@ -253,7 +261,10 @@ fn build_native(
     let task = opts.progress.begin("nix build");
     task.phase(&installable);
     let mut cmd = nix(caller, &project.root);
-    cmd.args(["build", "--no-link", "--print-out-paths", "--profile"]).arg(cache.gcroot_path()).arg(&installable);
+    cmd.args(["build", "--no-link", "--print-out-paths", "--profile"])
+        .arg(cache.gcroot_path())
+        .arg(&installable)
+        .args(&project.invocation.nix_args);
     let stdout = match run_task(&mut cmd, &task, opts) {
         Ok(stdout) => stdout,
         // Not necessarily a native shell at all; the harness evaluates
@@ -328,7 +339,7 @@ fn pin_inputs_now(
         .and_then(|i| i.split_once('#').map(|(base, _)| base.to_string()))
         .unwrap_or_else(|| ".".to_string());
     let mut archive = nix(caller, &project.root);
-    archive.args(["flake", "archive", "--json", "--no-write-lock-file"]).arg(&flake);
+    archive.args(["flake", "archive", "--json", "--no-write-lock-file"]).arg(&flake).args(&project.invocation.nix_args);
     let stdout = run_task(&mut archive, task, opts).context("nix flake archive")?;
     let tree: serde_json::Value = serde_json::from_slice(&stdout).context("parsing nix flake archive output")?;
     let paths = input_paths(&tree);
@@ -336,7 +347,11 @@ fn pin_inputs_now(
     std::fs::create_dir_all(dir)?;
     if !paths.is_empty() {
         let mut build = nix(caller, &project.root);
-        build.args(["build", "--no-write-lock-file", "--out-link"]).arg(dir.join("in")).args(&paths);
+        build
+            .args(["build", "--no-write-lock-file", "--out-link"])
+            .arg(dir.join("in"))
+            .args(&paths)
+            .args(&project.invocation.nix_args);
         run_task(&mut build, task, opts).with_context(|| format!("rooting {} inputs", paths.len()))?;
     }
     Ok(paths.len())
@@ -567,10 +582,12 @@ fn build_script(project: &Project) -> String {
         script.push_str(". ./.envrc\n");
     } else {
         let config = &project.config;
-        let flake_ref =
-            config.flake.clone().or_else(|| project.root.join("flake.nix").is_file().then(|| ".".to_string()));
-        if let Some(flake_ref) = flake_ref {
-            script.push_str(&format!("use_flake {}\n", quote_single(&flake_ref)));
+        if let Some(flake_ref) = project.flake_ref() {
+            script.push_str(&format!("use_flake {}", quote_single(&flake_ref)));
+            for arg in &project.invocation.nix_args {
+                script.push_str(&format!(" {}", quote_single(arg)));
+            }
+            script.push('\n');
         }
         for (name, value) in &config.env {
             script.push_str(&format!("export {name}={}\n", quote_single(value)));
@@ -704,6 +721,20 @@ mod tests {
         let script = build_script(&Project::at(&dir).unwrap());
         assert!(script.contains(". ./.envrc"));
         assert!(!script.contains("use_flake '.'"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_harness_passes_the_invocation_to_use_flake() {
+        let dir = scratch("invocation");
+        std::fs::write(dir.join("flake.nix"), "{}").unwrap();
+        let project = Project::at(&dir).unwrap().with_invocation(crate::project::Invocation {
+            flake: Some("path:.#ci".into()),
+            nix_args: vec!["--option".into(), "build-users-group".into(), String::new()],
+        });
+        let script = build_script(&project);
+        assert!(script.contains("use_flake 'path:.#ci' '--option' 'build-users-group' ''\n"), "{script}");
+        assert_eq!(native_installable(&project).unwrap(), format!("path:.#devShells.{}.ci", current_system()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
