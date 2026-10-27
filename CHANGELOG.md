@@ -16,6 +16,12 @@ follow [Semantic Versioning](https://semver.org/).
   runs; both key the cache. `--no-pin-inputs` skips rooting flake inputs
   for a cache that dies with its caller. Together they replace a CI
   builder's `direnv export json` over a `.envrc`.
+- **A warm fetches the way its caller does.** nix's own settings
+  (`NIX_CONFIG`, `NIX_REMOTE`, `NIX_SSL_CERT_FILE`, …), TLS trust,
+  proxies and git's environment config (`GIT_CONFIG_COUNT` /
+  `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n`) now reach nix; a CI builder's
+  substituters and mirror credential previously never did. Like the
+  rest of the caller's environment they are never recorded in a profile.
 
 ### Changed
 

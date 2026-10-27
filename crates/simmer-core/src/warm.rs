@@ -61,6 +61,40 @@ pub const MODE_ENVRC: &str = "envrc";
 /// that happen to match it.
 const HARNESS_KEEP: &[&str] = &["HOME", "LANG", "LOGNAME", "PATH", "TERM", "TZ", "USER", "XDG_RUNTIME_DIR"];
 
+/// Caller variables that configure how nix and git fetch rather than what
+/// the environment holds: nix's own settings and daemon, TLS trust,
+/// proxies, and git's environment config (a CI builder's credential for a
+/// mirrored input). A warm must fetch the way its caller does. They never
+/// reach a profile: a variable passed through unchanged is not recorded.
+const FETCH_KEEP: &[&str] = &[
+    "NIX_CONFIG",
+    "NIX_CONF_DIR",
+    "NIX_REMOTE",
+    "NIX_SSL_CERT_FILE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "GIT_SSL_CAINFO",
+    "CURL_CA_BUNDLE",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "GIT_CONFIG_COUNT",
+    "GIT_TERMINAL_PROMPT",
+];
+const FETCH_KEEP_PREFIXES: &[&str] = &["GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_", "LC_"];
+
+/// Whether a caller variable is visible to the warm.
+fn caller_keeps(name: &str) -> bool {
+    HARNESS_KEEP.contains(&name)
+        || FETCH_KEEP.contains(&name)
+        || FETCH_KEEP_PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
 /// How a warm runs: what to report to, and when to give up.
 #[derive(Clone)]
 pub struct WarmOptions {
@@ -120,8 +154,7 @@ pub fn warm_opts(project: &Project, cache: &Cache, opts: &WarmOptions) -> Result
     let started = Instant::now();
     cache.ensure_dir()?;
     opts.progress.set_log_dir(cache.logs_dir());
-    let caller: BTreeMap<String, String> =
-        std::env::vars().filter(|(k, _)| HARNESS_KEEP.contains(&k.as_str()) || k.starts_with("LC_")).collect();
+    let caller: BTreeMap<String, String> = std::env::vars().filter(|(k, _)| caller_keeps(k)).collect();
 
     let try_native =
         project.sourced_envrc().is_none() && (opts.probe || cache.warm_mode().as_deref() != Some(MODE_HARNESS));
@@ -722,6 +755,19 @@ mod tests {
         assert!(script.contains(". ./.envrc"));
         assert!(!script.contains("use_flake '.'"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn fetch_configuration_reaches_the_warm_and_nothing_else_does() {
+        for name in
+            ["NIX_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_12", "https_proxy", "LC_ALL"]
+        {
+            assert!(caller_keeps(name), "{name}");
+        }
+        // Session state a previous environment left behind stays out.
+        for name in ["NIX_USER_CONF_FILES", "SIMMER_GEN", "DIRENV_DIR", "GIT_DIR", "CARGO_HOME", "SHELL"] {
+            assert!(!caller_keeps(name), "{name}");
+        }
     }
 
     #[test]

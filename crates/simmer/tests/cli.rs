@@ -315,7 +315,12 @@ fn export_json_builds_under_the_invocation_and_refuses_untrusted() {
     let w = World::new("headless");
     w.native_shell(r#""NATIVE":{"kind":"set","value":"yes"}"#);
     let log = w.root.join("nix.log");
-    w.knobs(&[format!("FAKE_NIX_OUT={}", w.root.join("out").display()), format!("FAKE_NIX_LOG={}", log.display())]);
+    let env_log = w.root.join("nix-env.log");
+    w.knobs(&[
+        format!("FAKE_NIX_OUT={}", w.root.join("out").display()),
+        format!("FAKE_NIX_LOG={}", log.display()),
+        format!("FAKE_NIX_ENV_LOG={}", env_log.display()),
+    ]);
     // A lock file makes input rooting due, so skipping it is observable.
     std::fs::write(w.proj().join("flake.lock"), "{\"version\":7}\n").unwrap();
     let headless = [
@@ -333,8 +338,23 @@ fn export_json_builds_under_the_invocation_and_refuses_untrusted() {
     assert!(text(&out.stderr).contains("simmer allow --dir"), "{}", text(&out.stderr));
 
     assert!(w.run(&["allow"]).status.success());
-    let out = w.run(&headless);
+    // The builder's nix settings and git credential reach nix; unrelated
+    // caller state does not.
+    let out = w
+        .cmd(&headless)
+        .env("NIX_CONFIG", "extra-substituters = http://cache")
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+        .env("GIT_CONFIG_VALUE_0", "Authorization: Bearer t")
+        .env("UNRELATED", "x")
+        .output()
+        .unwrap();
     assert!(out.status.success(), "{}", text(&out.stderr));
+    let nix_env = std::fs::read_to_string(&env_log).unwrap();
+    for kept in ["NIX_CONFIG=extra-substituters", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_VALUE_0=Authorization"] {
+        assert!(nix_env.contains(kept), "{kept} must reach nix");
+    }
+    assert!(!nix_env.contains("UNRELATED="), "the warm scrubs everything else");
     let env: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(env["NATIVE"], "yes", "{env}");
     // The invocation's flake and nix arguments reach the build.
