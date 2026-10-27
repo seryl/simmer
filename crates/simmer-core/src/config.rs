@@ -1,4 +1,5 @@
-//! `.simmer.toml` — the project manifest (preferred over `.envrc`).
+//! `.simmer.toml` — the project manifest. When present it outranks a
+//! `.envrc`, which simmer then never sources (it stays for direnv callers).
 //!
 //! ```toml
 //! # Which environment to load. Defaults to "." when flake.nix exists,

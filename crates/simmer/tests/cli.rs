@@ -290,6 +290,27 @@ fn harness_projects_build_through_envrc() {
 }
 
 #[test]
+fn a_manifest_outranks_the_envrc_and_loads_natively() {
+    let w = World::new("outrank");
+    w.native_shell(r#""NATIVE":{"kind":"set","value":"yes"}"#);
+    // The .envrc a direnv-driven builder reads; simmer must not source it.
+    std::fs::write(w.proj().join(".envrc"), "use flake\nexport FROM_ENVRC=yes\n").unwrap();
+    std::fs::write(w.proj().join(".simmer.toml"), "watch = []\n").unwrap();
+    let out = w.run(&["warm", "--plain"]);
+    let err = text(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("nix build") && !err.contains("harness (.envrc)"), "{err}");
+    let script = text(&w.run(&["export", "bash"]).stdout);
+    assert!(script.contains("export NATIVE='yes'") && !script.contains("FROM_ENVRC"), "{script}");
+    // Editing the outranked .envrc neither revokes trust nor goes stale.
+    std::fs::write(w.proj().join(".envrc"), "use flake\nexport FROM_ENVRC=changed\n").unwrap();
+    let status: serde_json::Value = serde_json::from_slice(&w.run(&["status"]).stdout).unwrap();
+    assert_eq!(status["trusted"], true, "{status}");
+    assert_eq!(status["fresh"], true, "{status}");
+    assert_eq!(status["mode"], "native", "{status}");
+}
+
+#[test]
 fn errors_explain_what_to_do() {
     let w = World::new("errors");
     std::fs::remove_file(w.proj().join("flake.nix")).unwrap();

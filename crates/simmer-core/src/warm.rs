@@ -12,7 +12,9 @@
 //!   scrubbed bash harness: the shim (`shim.bash`) provides
 //!   direnv-compatible functions; on top of it the script is either the
 //!   project's `.envrc` (compat mode) or a few generated lines from
-//!   `.simmer.toml`. `nix print-dev-env`'s script output applies
+//!   `.simmer.toml`. A manifest outranks a `.envrc`
+//!   ([`Project::sourced_envrc`]), so a project can keep a `.envrc` for
+//!   direnv callers and still load natively here. `nix print-dev-env`'s script output applies
 //!   variables, defines functions, and ends with `eval "${shellHook:-}"`.
 //!
 //! An explicit `simmer warm` probes native first and remembers the
@@ -44,7 +46,13 @@ use std::time::Instant;
 const SHIM: &str = include_str!("shim.bash");
 
 pub const MODE_NATIVE: &str = "native";
+/// The harness, chosen because the native probe found no `env.json`:
+/// remembered so daemon warms skip the speculative build.
 pub const MODE_HARNESS: &str = "harness";
+/// The harness, chosen because simmer sources the project's `.envrc`. No
+/// probe ran, so this says nothing about native: once a manifest
+/// outranks the `.envrc`, the next warm probes.
+pub const MODE_ENVRC: &str = "envrc";
 
 /// The only caller variables visible to the warm harness. Warming must
 /// produce the same profile whether it ran from a login shell, a cron
@@ -112,7 +120,7 @@ pub fn warm_opts(project: &Project, cache: &Cache, opts: &WarmOptions) -> Result
         std::env::vars().filter(|(k, _)| HARNESS_KEEP.contains(&k.as_str()) || k.starts_with("LC_")).collect();
 
     let try_native =
-        project.envrc_path().is_none() && (opts.probe || cache.warm_mode().as_deref() != Some(MODE_HARNESS));
+        project.sourced_envrc().is_none() && (opts.probe || cache.warm_mode().as_deref() != Some(MODE_HARNESS));
     let native = if try_native { build_native(project, cache, &caller, opts)? } else { None };
 
     let (vars, mut dynamic, boot_scoped, mode, banner) = match native {
@@ -138,7 +146,8 @@ pub fn warm_opts(project: &Project, cache: &Cache, opts: &WarmOptions) -> Result
         None => {
             let (captured, dynamic) = run_harness(project, &caller, cache, opts)?;
             let vars = captured_vars(captured, &caller);
-            (vars, dynamic, false, MODE_HARNESS, None)
+            let mode = if project.sourced_envrc().is_some() { MODE_ENVRC } else { MODE_HARNESS };
+            (vars, dynamic, false, mode, None)
         }
     };
     // Wildcard watches are expanded here, once, into the dynamic set the
@@ -553,7 +562,7 @@ fn build_script(project: &Project) -> String {
     let mut script = String::from("set +e\n");
     script.push_str(SHIM);
     script.push('\n');
-    if project.envrc_path().is_some() {
+    if project.sourced_envrc().is_some() {
         // direnv compat: the .envrc drives the environment via the shim.
         script.push_str(". ./.envrc\n");
     } else {
@@ -602,7 +611,7 @@ fn run_harness(
     let layout_dir = cache.dir.join("layout");
     std::fs::create_dir_all(&layout_dir)?;
 
-    let label = if project.envrc_path().is_some() { "harness (.envrc)" } else { "harness (print-dev-env)" };
+    let label = if project.sourced_envrc().is_some() { "harness (.envrc)" } else { "harness (print-dev-env)" };
     let task = opts.progress.begin(label);
     let mut cmd = Command::new("bash");
     cmd.args(["--noprofile", "--norc"])

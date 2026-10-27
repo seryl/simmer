@@ -222,6 +222,13 @@ invalidation), `env_vars_required`, `has`, `expand_path`, `log_status`,
 build fails with nix's exit status. Trust for an `.envrc` project is bound
 to the file's content: editing it revokes trust, as with direnv.
 
+A `.simmer.toml` outranks a `.envrc`. With both present simmer never sources
+the `.envrc` — it loads the project natively (or through the manifest) and
+trusts it like any manifest project — while direnv-driven callers (a CI
+builder's `direnv exec`) keep reading the `.envrc` unchanged. Keep the two
+equivalent; editing the outranked `.envrc` does not rebuild simmer's
+environment.
+
 ### `env.json` (environments as data)
 
 A dev shell whose output contains an `env.json` is loaded *natively*: one
@@ -269,7 +276,7 @@ simmer deny     # simmer goes inert here and stops hinting
 
 For flake and manifest projects trust sticks to the directory (flake edits
 are routine, and the daemon must be able to rebuild them). For `.envrc`
-projects it is bound to the file's content.
+projects without a manifest it is bound to the file's content.
 
 `simmer allow` is also the migration switch from direnv: until you allow a
 project, simmer leaves it alone and direnv (if hooked) keeps owning it.

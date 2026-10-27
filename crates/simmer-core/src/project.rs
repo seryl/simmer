@@ -1,6 +1,6 @@
 //! Project discovery and generation hashing.
 
-use crate::config::{boot_id, Config};
+use crate::config::{boot_id, Config, MANIFEST_NAMES};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -86,6 +86,11 @@ pub struct Project {
     /// Whether the generation also keys on the kernel boot id — true when
     /// a provider (manifest or shell-declared) probes per-boot state.
     pub boot_scoped: bool,
+    /// Whether a `.simmer.toml` declares how simmer loads this project.
+    /// A manifest outranks a `.envrc`: the `.envrc` is then left to the
+    /// direnv-driven callers that still read it (a CI builder's
+    /// `direnv exec`), and simmer never sources it.
+    pub has_manifest: bool,
 }
 
 impl Project {
@@ -114,9 +119,13 @@ impl Project {
 
     pub fn at(root: &Path) -> Result<Self> {
         let config = Config::load(root)?;
+        let has_manifest = MANIFEST_NAMES.iter().any(|m| root.join(m).is_file());
+        // A .envrc the manifest outranks does not define the environment;
+        // editing it must not invalidate the cache.
+        let envrc: &[&str] = if has_manifest { &[] } else { &[".envrc"] };
         let mut watched: Vec<PathBuf> = WATCHED_FILES
             .iter()
-            .chain([".envrc"].iter())
+            .chain(envrc.iter())
             .map(PathBuf::from)
             .chain(config.watch.iter().filter(|w| !is_glob(w)).map(PathBuf::from))
             .filter(|f| root.join(f).is_file())
@@ -124,7 +133,7 @@ impl Project {
         watched.sort();
         watched.dedup();
         let boot_scoped = config.boot_scoped();
-        Ok(Project { root: root.to_path_buf(), config, watched, boot_scoped })
+        Ok(Project { root: root.to_path_buf(), config, watched, boot_scoped, has_manifest })
     }
 
     /// The manifest's wildcard `watch` entries.
@@ -167,14 +176,24 @@ impl Project {
         self.boot_scoped |= boot_scoped;
     }
 
+    /// The project's `.envrc`, whoever reads it. Use [`Self::sourced_envrc`]
+    /// to decide how simmer itself loads the project.
     pub fn envrc_path(&self) -> Option<PathBuf> {
         let path = self.root.join(".envrc");
         path.is_file().then_some(path)
     }
 
-    /// Content hash of .envrc, the trust anchor for direnv-style projects.
+    /// The `.envrc` simmer sources: present only when no manifest
+    /// outranks it. With one, the project loads natively (or through the
+    /// manifest's harness lines) whatever the `.envrc` says.
+    pub fn sourced_envrc(&self) -> Option<PathBuf> {
+        self.envrc_path().filter(|_| !self.has_manifest)
+    }
+
+    /// Content hash of the sourced .envrc, the trust anchor for
+    /// direnv-style projects.
     pub fn envrc_hash(&self) -> Option<String> {
-        let content = std::fs::read(self.envrc_path()?).ok()?;
+        let content = std::fs::read(self.sourced_envrc()?).ok()?;
         Some(hex(&Sha256::digest(&content)))
     }
 
@@ -311,6 +330,27 @@ mod tests {
         assert!(Project::discover(&dir).is_none());
         let err = Project::locate(&dir).unwrap_err();
         assert!(format!("{err:#}").contains(".simmer.toml"), "{err:#}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_manifest_outranks_the_envrc() {
+        let dir = scratch("outrank");
+        std::fs::write(dir.join("flake.nix"), "x").unwrap();
+        std::fs::write(dir.join(".envrc"), "use flake\n").unwrap();
+        let p = Project::at(&dir).unwrap();
+        assert!(p.sourced_envrc().is_some() && p.envrc_hash().is_some());
+        assert!(p.watched.contains(&PathBuf::from(".envrc")));
+
+        std::fs::write(dir.join(".simmer.toml"), "watch = []\n").unwrap();
+        let p = Project::at(&dir).unwrap();
+        assert!(p.envrc_path().is_some(), "the .envrc stays for direnv callers");
+        assert!(p.sourced_envrc().is_none() && p.envrc_hash().is_none());
+        assert!(!p.watched.contains(&PathBuf::from(".envrc")));
+        // Editing an outranked .envrc is not a new generation.
+        let g1 = p.generation().unwrap();
+        std::fs::write(dir.join(".envrc"), "use flake .#other\n").unwrap();
+        assert_eq!(g1, Project::at(&dir).unwrap().generation().unwrap());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -8,6 +8,14 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **A `.simmer.toml` outranks a `.envrc`.** A project with both loads
+  natively (or through the manifest) and simmer never sources the
+  `.envrc`, which stays for direnv-driven callers such as a CI builder.
+  Trust for such a project sticks to the directory, and an `.envrc`
+  edit no longer invalidates the cache. Warms that ran the `.envrc`
+  record mode `envrc` rather than `harness`, so the first warm after a
+  manifest appears probes for a native shell.
+
 - **simmer waits instead of backgrounding.** When the environment is stale,
   `simmer export` (the prompt hook) now rebuilds in the foreground and then
   applies the fresh environment, instead of serving the old one and

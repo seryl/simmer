@@ -183,7 +183,8 @@ impl Cache {
     /// Trust model: nothing is warmed or applied for a project until a
     /// human allowed it (running code from a just-cloned repo is direnv's
     /// one non-negotiable lesson). For `.envrc` projects trust is bound to
-    /// the file's content — editing it revokes trust, like direnv. For
+    /// the file's content — editing it revokes trust, like direnv. A
+    /// `.envrc` a manifest outranks is never sourced, so it is no anchor. For
     /// flake-only projects trust sticks to the root: flake edits are
     /// routine and re-prompting would neuter the pre-warm daemon (the
     /// hook still runs through nix's evaluator rather than raw bash).
